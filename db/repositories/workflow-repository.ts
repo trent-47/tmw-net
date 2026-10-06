@@ -22,6 +22,7 @@ function toWorkflow(row: WorkflowRow, nodes: NodeRow[]): Workflow {
         id: node.id,
         kind: node.kind as Workflow["nodes"][number]["kind"],
         name: node.name,
+        ...(node.icon ? { icon: node.icon } : {}),
         ...(node.capability ? { capability: node.capability } : {}),
         ...(node.config && typeof node.config === "object" ? { config: node.config as Record<string, unknown> } : {}),
       })),
@@ -65,6 +66,7 @@ export class WorkflowRepository {
             organizationId,
             kind: node.kind,
             name: node.name,
+            icon: node.icon ?? "zap",
             capability: node.capability,
             config: node.config,
             position: index,
@@ -93,6 +95,14 @@ export class WorkflowRepository {
     }
     const nodes = await db().select().from(workflowNodes).where(eq(workflowNodes.workflowId, row.id));
     return toWorkflow(row, nodes);
+  }
+
+  async delete(id: string, organizationId = "local-workspace"): Promise<boolean> {
+    const deleted = await db()
+      .delete(workflows)
+      .where(and(eq(workflows.id, id), eq(workflows.organizationId, organizationId)))
+      .returning({ id: workflows.id });
+    return deleted.length > 0;
   }
 
   async list(organizationId = "local-workspace"): Promise<Workflow[]> {

@@ -20,3 +20,17 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "Invalid workflow" }, { status: 400 });
   }
 }
+
+export async function DELETE(request: Request) {
+  try {
+    const url = new URL(request.url);
+    const workflowId = url.searchParams.get("id");
+    if (!workflowId) return NextResponse.json({ error: "Workflow id is required" }, { status: 400 });
+    const organizationId = await sessionWorkspace(request);
+    const deleted = await workflowRepository.delete(workflowId, organizationId);
+    if (!deleted) return NextResponse.json({ error: "Workflow not found" }, { status: 404 });
+    return NextResponse.json({ deleted: true });
+  } catch (error) {
+    return NextResponse.json({ error: error instanceof Error ? error.message : "Could not delete workflow" }, { status: 400 });
+  }
+}

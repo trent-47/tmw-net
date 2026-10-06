@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { sessionWorkspace } from "@/auth/store";
+import { networkMonitor } from "@/core/monitoring/monitor";
 import { tenantMonitorStore } from "@/core/monitoring/store";
 
 export const dynamic = "force-dynamic";
@@ -17,8 +18,10 @@ export async function POST(request: Request) {
   try {
     const body = await request.json() as { name?: string; ip?: string; subnet?: string; mac?: string; type?: string };
     if (!body.name?.trim() || !body.ip?.trim()) return NextResponse.json({ error: "Device name and IP address are required" }, { status: 400 });
-    const device = await tenantMonitorStore.createDevice(await sessionWorkspace(request), { name: body.name.trim(), ip: body.ip.trim(), subnet: body.subnet, mac: body.mac, type: body.type });
-    return NextResponse.json({ device }, { status: 201 });
+    const organizationId = await sessionWorkspace(request);
+    const device = await tenantMonitorStore.createDevice(organizationId, { name: body.name.trim(), ip: body.ip.trim(), subnet: body.subnet, mac: body.mac, type: body.type });
+    const outcome = await networkMonitor.testDevice(organizationId, device, "ping");
+    return NextResponse.json({ device: { ...device, status: outcome.status }, outcome }, { status: 201 });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "Could not add device" }, { status: 400 });
   }

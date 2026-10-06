@@ -79,6 +79,14 @@ export type MonitoringSettings = {
   aiProvider: string;
   aiModel: string;
   aiInstruction: string;
+  aiApiKeyConfigured: boolean;
+  aiProviderConfigurations: Array<{ provider: string; model: string; apiKeyConfigured: boolean }>;
+  smtpHost: string;
+  smtpPort: number;
+  smtpSecure: boolean;
+  smtpUser: string;
+  smtpFrom: string;
+  smtpPasswordConfigured: boolean;
   updatedAt: string;
 };
 

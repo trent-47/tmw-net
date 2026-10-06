@@ -1,6 +1,10 @@
+import { execFile } from "node:child_process";
 import net from "node:net";
+import { promisify } from "node:util";
 import snmp from "net-snmp";
 import type { ProbeKind, ProbeResult } from "@/core/monitoring/types";
+
+const execFileAsync = promisify(execFile);
 
 const OID = {
   sysDescr: "1.3.6.1.2.1.1.1.0",
@@ -55,7 +59,39 @@ async function latencyProbe(host: string, timeoutMs: number): Promise<{ ok: bool
   return { ok: false, latencyMs: null, error: lastError ?? "No reachable service port (80, 443, 22, 3389)" };
 }
 
+async function systemPing(host: string, timeoutMs: number): Promise<{ ok: boolean; latencyMs: number | null; error?: string }> {
+  const platform = process.platform;
+  const args = platform === "win32"
+    ? ["-n", "1", "-w", String(timeoutMs), host]
+    : ["-c", "1", "-W", String(Math.ceil(timeoutMs / 1000)), host];
+
+  const command = platform === "win32" ? "ping" : "ping";
+
+  try {
+    const { stdout, stderr } = await execFileAsync(command, args, { timeout: timeoutMs + 1000, windowsHide: true });
+    const combined = `${stdout ?? ""}\n${stderr ?? ""}`;
+    const reply = /Reply from .*?: bytes=\d+/i.test(combined) || /bytes from .*?:\s*icmp_seq=/i.test(combined);
+    const latencyMatch = combined.match(/time[=< ]?([0-9.]+)\s*ms/i);
+    const latencyMs = latencyMatch ? Number(latencyMatch[1]) : null;
+    if (reply) return { ok: true, latencyMs, error: undefined };
+    return { ok: false, latencyMs: null, error: combined.trim() || "Ping failed" };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { ok: false, latencyMs: null, error: message };
+  }
+}
+
 export async function pingProbe(host: string, count = 4, timeoutMs = 2000): Promise<{ ok: boolean; latencyMs: number | null; packetLossPercent: number; error?: string }> {
+  const first = await systemPing(host, timeoutMs);
+  if (first.ok) {
+    return {
+      ok: true,
+      latencyMs: first.latencyMs,
+      packetLossPercent: 0,
+      error: undefined,
+    };
+  }
+
   const results: Array<{ ok: boolean; latencyMs: number | null; error?: string }> = [];
   for (let index = 0; index < count; index += 1) {
     results.push(await latencyProbe(host, timeoutMs));
@@ -66,7 +102,7 @@ export async function pingProbe(host: string, count = 4, timeoutMs = 2000): Prom
     ok: successes.length > 0,
     latencyMs: latencies.length ? Math.round(latencies.reduce((sum, latency) => sum + latency, 0) / latencies.length) : null,
     packetLossPercent: Math.round(((count - successes.length) / count) * 100),
-    error: successes.length ? undefined : results[results.length - 1]?.error ?? "No response from host",
+    error: successes.length ? undefined : first.error ?? results[results.length - 1]?.error ?? "No response from host",
   };
 }
 

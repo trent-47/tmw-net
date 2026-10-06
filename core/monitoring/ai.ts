@@ -7,6 +7,7 @@ export type AiFaultContext = {
   probe: string;
   checks: Pick<CheckRow, "ok" | "latencyMs" | "packetLossPercent" | "bandwidthInMbps" | "bandwidthOutMbps" | "detail" | "checkedAt">[];
   instruction?: string;
+  recommendation?: string;
 };
 
 export type AiConfig = { provider: string; model?: string; apiKey?: string; baseUrl?: string };
@@ -49,9 +50,11 @@ function buildPrompt(context: AiFaultContext): string {
     `IP address: ${context.device.ip}`,
     `Device type: ${context.device.type}`,
     `Detected status: ${context.status} (severity: ${context.severity})`,
+    "Severity is determined by monitoring rules. Preserve the supplied severity and do not downgrade it.",
     `Probe used: ${context.probe}`,
     latest ? `Latest evidence: ok=${latest.ok}, latency=${latest.latencyMs ?? "n/a"} ms, packet loss=${latest.packetLossPercent}%, bandwidth in=${latest.bandwidthInMbps ?? "n/a"} Mbps, out=${latest.bandwidthOutMbps ?? "n/a"} Mbps, detail=${latest.detail ?? "none"}` : "Latest evidence: none",
-    `Recent samples: ${context.checks.length}`,
+    `Recent check history (newest first): ${context.checks.slice(0, 5).map((check) => `${check.checkedAt}: ${check.ok ? "reachable" : "failed"}, latency ${check.latencyMs ?? "n/a"}ms, loss ${check.packetLossPercent}%`).join("; ") || "none"}`,
+    `Recommended action: ${context.recommendation ?? "Diagnose the fault using the measured evidence and recommend a specific next step."}`,
     "",
     context.instruction?.trim() || DEFAULT_INSTRUCTION,
     "",
@@ -73,7 +76,8 @@ function splitSubject(text: string, fallback: AiFaultContext): { subject: string
 
 async function callProvider(config: AiConfig, prompt: string): Promise<string> {
   const { url, style } = providerEndpoint(config.provider, config.baseUrl);
-  const model = config.model?.trim() || "gemini-2.5-flash";
+  const defaults: Record<string, string> = { gemini: "gemini-2.5-flash", groq: "llama-3.3-70b-versatile", openai: "gpt-4o-mini", anthropic: "claude-3-5-haiku-latest", mistral: "mistral-small-latest" };
+  const model = config.model?.trim() || defaults[config.provider.toLowerCase()] || "gpt-4o-mini";
   if (style === "google") {
     const response = await fetch(`${url}/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(config.apiKey ?? "")}`, {
       method: "POST",
@@ -81,7 +85,7 @@ async function callProvider(config: AiConfig, prompt: string): Promise<string> {
       body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
       signal: AbortSignal.timeout(20_000),
     });
-    if (!response.ok) throw new Error(`Gemini request failed: ${response.status}`);
+    if (!response.ok) throw new Error(`Gemini request failed: ${response.status} ${await response.text().then((text) => text.slice(0, 400))}`);
     const data = (await response.json()) as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
     return data.candidates?.[0]?.content?.parts?.map((part) => part.text ?? "").join("") ?? "";
   }
@@ -92,7 +96,7 @@ async function callProvider(config: AiConfig, prompt: string): Promise<string> {
       body: JSON.stringify({ model, max_tokens: 700, messages: [{ role: "user", content: prompt }] }),
       signal: AbortSignal.timeout(20_000),
     });
-    if (!response.ok) throw new Error(`Anthropic request failed: ${response.status}`);
+    if (!response.ok) throw new Error(`Anthropic request failed: ${response.status} ${await response.text().then((text) => text.slice(0, 400))}`);
     const data = (await response.json()) as { content?: Array<{ text?: string }> };
     return data.content?.map((part) => part.text ?? "").join("") ?? "";
   }
@@ -102,7 +106,7 @@ async function callProvider(config: AiConfig, prompt: string): Promise<string> {
     body: JSON.stringify({ model, messages: [{ role: "user", content: prompt }], max_tokens: 700 }),
     signal: AbortSignal.timeout(20_000),
   });
-  if (!response.ok) throw new Error(`${config.provider} request failed: ${response.status}`);
+  if (!response.ok) throw new Error(`${config.provider} request failed: ${response.status} ${await response.text().then((text) => text.slice(0, 400))}`);
   const data = (await response.json()) as { choices?: Array<{ message?: { content?: string } }> };
   return data.choices?.[0]?.message?.content ?? "";
 }

@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Softcape | Automation control plane",
-  description: "Event-driven automation for teams, systems, and AI agents.",
+  title: "tmw-net | Automation control plane",
+  description: "Event-driven network automation for teams, systems, and AI agents.",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

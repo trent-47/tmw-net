@@ -58,7 +58,26 @@ export type BackendResult = {
 
 export type ExecutionRun = { id: string; time: string; status: string; detail: string };
 
-export type SettingsForm = { pollingInterval: string; failureThreshold: string };
+export type SettingsForm = {
+  pollingInterval: string;
+  failureThreshold: string;
+  latencyWarningMs: string;
+  packetLossWarningPercent: string;
+  aiProvider: string;
+  aiModel: string;
+  aiInstruction: string;
+  aiApiKey: string;
+  aiApiKeyConfigured: boolean;
+  aiProviderConfigurations: Array<{ provider: string; model: string; apiKeyConfigured: boolean }>;
+  adminEmail: string;
+  smtpHost: string;
+  smtpPort: string;
+  smtpSecure: boolean;
+  smtpUser: string;
+  smtpFrom: string;
+  smtpPassword: string;
+  smtpPasswordConfigured: boolean;
+};
 
 export type EntryField =
   | "email"

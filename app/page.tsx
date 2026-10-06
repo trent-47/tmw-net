@@ -22,12 +22,8 @@ import {
 import {
   getThemeServerSnapshot,
   getThemeSnapshot,
-  getWorkflowsServerSnapshot,
-  getWorkflowsSnapshot,
-  saveWorkflows,
   setThemePreference,
   subscribeTheme,
-  subscribeWorkflows,
 } from "@/components/dashboard/workspace-store";
 import type {
   BackendAlert,
@@ -47,12 +43,12 @@ import type {
 
 const initialNodes: WorkflowNode[] = [];
 
-const initialDevices: DeviceEntry[] = [
-  { name: "Core Router", ip: "192.168.1.1", subnet: "255.255.255.0", mac: "", type: "router", status: "Online" },
-  { name: "Admin Switch", ip: "192.168.1.10", subnet: "255.255.255.0", mac: "", type: "switch", status: "Online" },
-  { name: "Application Server", ip: "192.168.1.20", subnet: "255.255.255.0", mac: "", type: "server", status: "Warning" },
-  { name: "Library Access Point", ip: "192.168.1.30", subnet: "", mac: "", type: "router", status: "Offline" },
-];
+const initialDevices: DeviceEntry[] = [];
+const AI_PROVIDER_LABELS: Record<string, string> = { gemini: "Gemini", groq: "Groq", openai: "OpenAI", anthropic: "Anthropic", mistral: "Mistral", custom: "Custom" };
+
+function aiProviderLabel(provider: string): string {
+  return AI_PROVIDER_LABELS[provider.toLowerCase()] ?? provider;
+}
 
 export default function NetworkAutomationEditor() {
   /* ---------------- entry flow state ---------------- */
@@ -78,7 +74,26 @@ export default function NetworkAutomationEditor() {
   const [search, setSearch] = useState("");
   const [leftOpen, setLeftOpen] = useState(true);
   const [rightOpen, setRightOpen] = useState(true);
-  const [settingsState, setSettingsState] = useState<SettingsForm>({ pollingInterval: "30", failureThreshold: "3" });
+  const [settingsState, setSettingsState] = useState<SettingsForm>({
+    pollingInterval: "60",
+    failureThreshold: "3",
+    latencyWarningMs: "500",
+    packetLossWarningPercent: "10",
+    aiProvider: "groq",
+    aiModel: "llama-3.3-70b-versatile",
+    aiInstruction: "Write a concise, professional network fault email. State the measured severity without changing it, include device name, IP, probe result, latency, packet loss and recent check history, then recommend evidence-based troubleshooting steps.",
+    aiApiKey: "",
+    aiApiKeyConfigured: false,
+    aiProviderConfigurations: [],
+    adminEmail: "",
+    smtpHost: "smtp.gmail.com",
+    smtpPort: "465",
+    smtpSecure: true,
+    smtpUser: "",
+    smtpFrom: "",
+    smtpPassword: "",
+    smtpPasswordConfigured: false,
+  });
   const [executionHistory, setExecutionHistory] = useState<ExecutionRun[]>([]);
   const [backendAlerts, setBackendAlerts] = useState<BackendAlert[]>([]);
   const [backendResults, setBackendResults] = useState<BackendResult[]>([]);
@@ -86,7 +101,7 @@ export default function NetworkAutomationEditor() {
   const [activeSection, setActiveSection] = useState<EditorSection>("Workflows");
   const theme = useSyncExternalStore(subscribeTheme, getThemeSnapshot, getThemeServerSnapshot);
   const [workflowName, setWorkflowName] = useState("");
-  const workflowLibrary = useSyncExternalStore(subscribeWorkflows, getWorkflowsSnapshot, getWorkflowsServerSnapshot);
+  const [workflowLibrary, setWorkflowLibrary] = useState<SavedWorkflow[]>([]);
   const [activeWorkflowId, setActiveWorkflowId] = useState<string | null>(null);
   const [workflowView, setWorkflowView] = useState<"library" | "editor">("library");
   const [workflowSearch, setWorkflowSearch] = useState("");
@@ -95,8 +110,8 @@ export default function NetworkAutomationEditor() {
   const [inspectorTab, setInspectorTab] = useState<"Parameters" | "Settings">("Parameters");
   const [smtpUser, setSmtpUser] = useState("");
   const [smtpAppPassword, setSmtpAppPassword] = useState("");
-  const [smtpFrom, setSmtpFrom] = useState("network-monitor@yourdomain.com");
-  const [smtpRecipients, setSmtpRecipients] = useState("admin@yourdomain.com");
+  const [smtpFrom, setSmtpFrom] = useState("");
+  const [smtpRecipients, setSmtpRecipients] = useState("");
   const [smtpState, setSmtpState] = useState("");
   const [devices, setDevices] = useState<DeviceEntry[]>(initialDevices);
   const [deviceFormOpen, setDeviceFormOpen] = useState(false);
@@ -111,6 +126,9 @@ export default function NetworkAutomationEditor() {
   const [aiInstruction, setAiInstruction] = useState(
     "Write a concise, professional network fault notification. Include the affected device, IP, severity, evidence and recommended action."
   );
+  const [aiTestState, setAiTestState] = useState("");
+  const [emailTestState, setEmailTestState] = useState("");
+  const [aiPreview, setAiPreview] = useState<{ subject: string; body: string; provider: string; model: string; synthesized: boolean } | null>(null);
   const [aiKeys, setAiKeys] = useState<Record<string, string>>({
     Gemini: "",
     Groq: "",
@@ -129,9 +147,10 @@ export default function NetworkAutomationEditor() {
   });
   const [aiBaseUrls, setAiBaseUrls] = useState<Record<string, string>>({ Custom: "" });
   const [aiKeyState, setAiKeyState] = useState("");
-  const adminEmail = currentUser.email || smtpRecipients || "admin@example.com";
+  const adminEmail = currentUser.email || smtpRecipients || "";
 
   const canvasRef = useRef<HTMLDivElement>(null);
+  const monitoringSettingsDirty = useRef(false);
   const dragRef = useRef<
     | { kind: "pan"; startClientX: number; startClientY: number; startVx: number; startVy: number }
     | { kind: "node"; id: string; offX: number; offY: number }
@@ -155,16 +174,17 @@ export default function NetworkAutomationEditor() {
     let cancelled = false;
     const loadWorkspace = async () => {
       try {
-        const [deviceResponse, settingsResponse, alertsResponse, resultsResponse] = await Promise.all([
+        const [deviceResponse, settingsResponse, alertsResponse, resultsResponse, workflowResponse] = await Promise.all([
           fetch("/api/monitoring/devices"),
           fetch("/api/monitoring/settings"),
           fetch("/api/monitoring/alerts"),
           fetch("/api/monitoring/results?limit=50"),
+          fetch("/api/automations"),
         ]);
         if (cancelled) return;
         if (deviceResponse.ok) {
           const data = await deviceResponse.json() as { devices?: Array<Record<string, unknown>> };
-          if (data.devices?.length) {
+          if (data.devices && Array.isArray(data.devices)) {
             setDevices(data.devices.map((device) => ({
               name: String(device.name ?? ""),
               ip: String(device.ip ?? ""),
@@ -177,14 +197,45 @@ export default function NetworkAutomationEditor() {
         }
         if (settingsResponse.ok) {
           const data = await settingsResponse.json() as { settings?: Record<string, unknown> };
-          if (data.settings) {
+          if (data.settings && !monitoringSettingsDirty.current) {
             setSettingsState((current) => ({
               ...current,
               pollingInterval: String(data.settings?.intervalSeconds ?? current.pollingInterval),
               failureThreshold: String(data.settings?.failureThreshold ?? current.failureThreshold),
+              latencyWarningMs: String(data.settings?.latencyWarningMs ?? current.latencyWarningMs),
+              packetLossWarningPercent: String(data.settings?.packetLossWarningPercent ?? current.packetLossWarningPercent),
+              aiProvider: String(data.settings?.aiProvider ?? current.aiProvider),
+              aiModel: String(data.settings?.aiModel ?? current.aiModel),
+              aiInstruction: String(data.settings?.aiInstruction ?? current.aiInstruction),
+              aiApiKeyConfigured: Boolean(data.settings?.aiApiKeyConfigured),
+              aiProviderConfigurations: Array.isArray(data.settings?.aiProviderConfigurations)
+                ? data.settings.aiProviderConfigurations as SettingsForm["aiProviderConfigurations"]
+                : current.aiProviderConfigurations,
+              aiApiKey: current.aiApiKey,
+              adminEmail: String(data.settings?.adminEmail ?? current.adminEmail),
+              smtpHost: String(data.settings?.smtpHost ?? current.smtpHost),
+              smtpPort: String(data.settings?.smtpPort ?? current.smtpPort),
+              smtpSecure: Boolean(data.settings?.smtpSecure ?? current.smtpSecure),
+              smtpUser: String(data.settings?.smtpUser ?? current.smtpUser),
+              smtpFrom: String(data.settings?.smtpFrom ?? current.smtpFrom),
+              smtpPassword: current.smtpPassword,
+              smtpPasswordConfigured: Boolean(data.settings?.smtpPasswordConfigured),
             }));
-            if (data.settings?.adminEmail) setSmtpRecipients(String(data.settings.adminEmail));
-            if (data.settings?.aiProvider) setAiProvider(String(data.settings.aiProvider).replace(/\b\w/g, (c) => c.toUpperCase()));
+            setSmtpRecipients(String(data.settings.adminEmail ?? ""));
+            setSmtpUser(String(data.settings.smtpUser ?? ""));
+            setSmtpFrom(String(data.settings.smtpFrom ?? ""));
+            if (data.settings?.aiProvider) {
+              const providerLabel = aiProviderLabel(String(data.settings.aiProvider));
+              setAiProvider(providerLabel);
+              const providerConfigurations = Array.isArray(data.settings.aiProviderConfigurations)
+                ? data.settings.aiProviderConfigurations as SettingsForm["aiProviderConfigurations"]
+                : [];
+              setAiModels((current) => ({
+                ...current,
+                ...Object.fromEntries(providerConfigurations.map((configuration) => [aiProviderLabel(configuration.provider), configuration.model])),
+                [providerLabel]: String(data.settings?.aiModel ?? current[providerLabel] ?? ""),
+              }));
+            }
             if (data.settings?.aiInstruction) setAiInstruction(String(data.settings.aiInstruction));
           }
         }
@@ -215,6 +266,30 @@ export default function NetworkAutomationEditor() {
             bandwidthOutMbps: result.bandwidthOutMbps === null || result.bandwidthOutMbps === undefined ? null : Number(result.bandwidthOutMbps),
             checkedAt: String(result.checkedAt ?? ""),
           })));
+        }
+        if (workflowResponse.ok) {
+          const data = await workflowResponse.json() as { workflows?: Array<Record<string, unknown>> };
+          const savedWorkflows: SavedWorkflow[] = (data.workflows ?? []).map((workflow, index) => {
+            const nodes = Array.isArray(workflow.nodes) ? workflow.nodes : [];
+            return {
+              id: String(workflow.id ?? `workflow-${index}`),
+              name: String(workflow.name ?? "Untitled workflow"),
+              published: Boolean(workflow.enabled),
+              createdAt: String(workflow.createdAt ?? new Date().toISOString()),
+              updatedAt: String(workflow.updatedAt ?? new Date().toISOString()),
+              nodes: nodes.map((node, nodeIndex) => ({
+                id: String(node.id ?? `${workflow.id ?? "workflow"}-${nodeIndex}`),
+                type: (node.kind === "trigger" || node.kind === "logic" || node.kind === "action") ? node.kind as WorkflowNode["type"] : "action",
+                name: String(node.name ?? "Node"),
+                description: String(node.description ?? `${String(node.kind ?? "action")} node`),
+                icon: String(node.icon ?? (node.name?.toLowerCase().includes("gmail") ? "mail" : node.name?.toLowerCase().includes("ai") ? "ai" : node.name?.toLowerCase().includes("alert") ? "alert" : node.kind === "trigger" ? "network" : node.kind === "logic" ? "if" : "zap")),
+                x: 240 + (nodeIndex % 4) * 260,
+                y: 180 + Math.floor(nodeIndex / 4) * 180,
+                config: node.config && typeof node.config === "object" ? Object.fromEntries(Object.entries(node.config).map(([key, value]) => [key, String(value)])) : undefined,
+              })),
+            };
+          });
+          setWorkflowLibrary(savedWorkflows);
         }
       } catch {
         /* workspace loads with local defaults when the API is unreachable */
@@ -440,35 +515,58 @@ export default function NetworkAutomationEditor() {
     }
   };
 
+  const refreshDevices = async () => {
+    try {
+      const response = await fetch("/api/monitoring/devices");
+      if (!response.ok) return;
+      const data = await response.json() as { devices?: Array<Record<string, unknown>> };
+      if (!data.devices || !Array.isArray(data.devices)) return;
+      setDevices(data.devices.map((device) => ({
+        name: String(device.name ?? ""),
+        ip: String(device.ip ?? ""),
+        subnet: String(device.subnet ?? ""),
+        mac: String(device.mac ?? ""),
+        type: String(device.type ?? "router"),
+        status: String(device.status ?? "Online"),
+      })));
+    } catch {
+      /* if the API is unavailable, the local UI state remains as-is */
+    }
+  };
+
   const addDevice = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!deviceForm.name.trim() || !deviceForm.ip.trim()) return;
-    setDevices((cur) => [
-      ...cur,
-      {
-        name: deviceForm.name.trim(),
-        ip: deviceForm.ip.trim(),
-        subnet: deviceForm.subnet.trim(),
-        mac: deviceForm.mac.trim(),
-        type: deviceForm.type,
-        status: "Online",
-      },
-    ]);
+    const nextDevice = {
+      name: deviceForm.name.trim(),
+      ip: deviceForm.ip.trim(),
+      subnet: deviceForm.subnet.trim(),
+      mac: deviceForm.mac.trim(),
+      type: deviceForm.type,
+      status: "Online",
+    };
+    setDevices((cur) => [...cur, nextDevice]);
     setDeviceForm({ name: "", ip: "", subnet: "", mac: "", type: "router" });
     setDeviceFormOpen(false);
     void fetch("/api/monitoring/devices", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name: deviceForm.name.trim(), ip: deviceForm.ip.trim(), subnet: deviceForm.subnet.trim(), mac: deviceForm.mac.trim(), type: deviceForm.type }),
-    }).then((response) => response.json().then((data) => ({ ok: response.ok, data }))).then(({ ok, data }) => {
-      if (ok) showNotice(`${deviceForm.name.trim()} registered for monitoring.`);
-      else showNotice(String((data as { error?: string }).error ?? "Device could not be saved to the monitoring database."));
+      body: JSON.stringify({ name: nextDevice.name, ip: nextDevice.ip, subnet: nextDevice.subnet, mac: nextDevice.mac, type: nextDevice.type }),
+    }).then(async (response) => {
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(String((data as { error?: string }).error ?? "Device could not be saved to the monitoring database."));
+      await refreshDevices();
+      showNotice(`${nextDevice.name} registered for monitoring.`);
     }).catch(() => showNotice("Device kept locally; the monitoring API was unreachable."));
   };
 
   const removeDevice = (ip: string) => {
     setDevices((cur) => cur.filter((d) => d.ip !== ip));
-    void fetch(`/api/monitoring/devices?ip=${encodeURIComponent(ip)}`, { method: "DELETE" }).catch(() => undefined);
+    void fetch(`/api/monitoring/devices?ip=${encodeURIComponent(ip)}`, { method: "DELETE" })
+      .then(async (response) => {
+        if (response.ok) await refreshDevices();
+      })
+      .catch(() => undefined);
   };
 
   const testDevice = (device: DeviceEntry) => {
@@ -477,9 +575,11 @@ export default function NetworkAutomationEditor() {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ ip: device.ip, probe: "ping" }),
-    }).then((response) => response.json()).then((data: { outcome?: { status?: string; latencyMs?: number | null; packetLossPercent?: number }; error?: string }) => {
-      if (data.error) { showNotice(data.error); return; }
+    }).then(async (response) => {
+      const data = await response.json().catch(() => ({})) as { outcome?: { status?: string; latencyMs?: number | null; packetLossPercent?: number }; error?: string };
+      if (!response.ok || data.error) throw new Error(data.error ?? "Device test failed");
       const outcome = data.outcome;
+      await refreshDevices();
       setDevices((cur) => cur.map((entry) => entry.ip === device.ip ? { ...entry, status: outcome?.status ?? entry.status } : entry));
       showNotice(`${device.name}: ${outcome?.status ?? "unknown"} · ${outcome?.latencyMs ?? "–"} ms · ${outcome?.packetLossPercent ?? 0}% loss`);
     }).catch(() => showNotice("Device test API unreachable."));
@@ -489,32 +589,139 @@ export default function NetworkAutomationEditor() {
     event?.preventDefault();
     setSmtpState("Saving SMTP configuration...");
     try {
-      const [settingsResponse, emailStatus] = await Promise.all([
-        fetch("/api/monitoring/settings", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ adminEmail: smtpRecipients || adminEmail }),
+      const settingsResponse = await fetch("/api/monitoring/settings", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          adminEmail: smtpRecipients || adminEmail,
+          smtpHost: settingsState.smtpHost,
+          smtpPort: Number(settingsState.smtpPort),
+          smtpSecure: settingsState.smtpSecure,
+          smtpUser: smtpUser || settingsState.smtpUser,
+          smtpFrom: smtpFrom || settingsState.smtpFrom,
+          ...(smtpAppPassword ? { smtpPassword: smtpAppPassword } : {}),
         }),
-        fetch("/api/monitoring/email"),
-      ]);
+      });
+      const data = await settingsResponse.json() as { settings?: Record<string, unknown>; error?: string };
+      if (!settingsResponse.ok) throw new Error(data.error ?? "Settings endpoint rejected the update");
+      const emailStatus = await fetch("/api/monitoring/email");
       const statusData = await emailStatus.json() as { smtpConfigured?: boolean; host?: string; port?: number; user?: string | null };
-      if (!settingsResponse.ok) throw new Error("Settings endpoint rejected the update");
+      setSettingsState((current) => ({ ...current, adminEmail: smtpRecipients || adminEmail, smtpUser: smtpUser || current.smtpUser, smtpFrom: smtpFrom || current.smtpFrom, smtpPassword: "", smtpPasswordConfigured: Boolean(data.settings?.smtpPasswordConfigured) }));
+      setSmtpAppPassword("");
       setSmtpState(statusData.smtpConfigured
         ? `SMTP ready on ${statusData.host}:${statusData.port} as ${statusData.user}. Fault alerts will dispatch to ${smtpRecipients || adminEmail}.`
-        : "Recipient saved. Set SMTP_HOST, SMTP_PORT, SMTP_USER and SMTP_PASSWORD server-side to enable live dispatch.");
-    } catch {
-      setSmtpState("SMTP configuration saved locally; the settings API was unreachable.");
+        : "SMTP settings saved. Enter the SMTP password/app password to enable delivery.");
+    } catch (error) {
+      setSmtpState(error instanceof Error ? error.message : "SMTP configuration could not be saved.");
     }
   };
 
-  const saveMonitoringSettings = () => {
-    void fetch("/api/monitoring/settings", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ intervalSeconds: Number(settingsState.pollingInterval), failureThreshold: Number(settingsState.failureThreshold), adminEmail: smtpRecipients || adminEmail, aiProvider: aiProvider.toLowerCase(), aiInstruction }),
-    }).then((response) => response.json()).then((data: { settings?: Record<string, unknown>; error?: string }) => {
-      showNotice(data.error ? `Settings could not be saved: ${data.error}` : "Monitoring settings saved to the organization database.");
-    }).catch(() => showNotice("Settings kept locally; the monitoring API was unreachable."));
+  const saveMonitoringSettings = async (): Promise<boolean> => {
+    const body: Record<string, unknown> = {
+      intervalSeconds: Number(settingsState.pollingInterval),
+      failureThreshold: Number(settingsState.failureThreshold),
+      latencyWarningMs: Number(settingsState.latencyWarningMs),
+      packetLossWarningPercent: Number(settingsState.packetLossWarningPercent),
+      adminEmail: settingsState.adminEmail || smtpRecipients || currentUser.email || "",
+      aiProvider: settingsState.aiProvider,
+      aiModel: settingsState.aiModel,
+      aiInstruction: settingsState.aiInstruction,
+      smtpHost: settingsState.smtpHost,
+      smtpPort: Number(settingsState.smtpPort),
+      smtpSecure: settingsState.smtpSecure,
+      smtpUser: settingsState.smtpUser,
+      smtpFrom: settingsState.smtpFrom,
+    };
+    if (settingsState.aiApiKey.trim()) body.aiApiKey = settingsState.aiApiKey.trim();
+    if (settingsState.smtpPassword.trim()) body.smtpPassword = settingsState.smtpPassword.trim();
+    try {
+      const response = await fetch("/api/monitoring/settings", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await response.json() as { settings?: Record<string, unknown>; error?: string };
+      if (!response.ok) throw new Error(data.error ?? "Settings could not be saved");
+      setSettingsState((current) => ({
+        ...current,
+        aiApiKey: "",
+        aiApiKeyConfigured: Boolean(data.settings?.aiApiKeyConfigured ?? current.aiApiKeyConfigured),
+        aiProviderConfigurations: Array.isArray(data.settings?.aiProviderConfigurations)
+          ? data.settings.aiProviderConfigurations as SettingsForm["aiProviderConfigurations"]
+          : current.aiProviderConfigurations,
+        smtpPassword: "",
+        smtpPasswordConfigured: Boolean(data.settings?.smtpPasswordConfigured ?? current.smtpPasswordConfigured),
+      }));
+      monitoringSettingsDirty.current = false;
+      setAiProvider(aiProviderLabel(settingsState.aiProvider));
+      setAiInstruction(settingsState.aiInstruction);
+      setAiModels((current) => ({ ...current, [aiProviderLabel(settingsState.aiProvider)]: settingsState.aiModel }));
+      showNotice("Monitoring, alert severity, and AI email settings saved securely.");
+      return true;
+    } catch (error) {
+      showNotice(error instanceof Error ? `Settings could not be saved: ${error.message}` : "Settings could not be saved.");
+      return false;
+    }
+  };
+
+  const sendTestEmail = async () => {
+    const recipient = settingsState.adminEmail || currentUser.email || smtpRecipients;
+    if (!recipient) {
+      setEmailTestState("Set an administrator email address before sending a test.");
+      return;
+    }
+    setEmailTestState(`Sending test email to ${recipient}...`);
+    try {
+      const saved = await saveMonitoringSettings();
+      if (!saved) throw new Error("Could not save settings before testing SMTP.");
+      const response = await fetch("/api/monitoring/email", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          to: recipient,
+          subject: "[NetMoni] SMTP delivery test",
+          message: "This is a test message from NetMoni. SMTP delivery is working.",
+        }),
+      });
+      const data = await response.json() as { sent?: boolean; accepted?: string[]; error?: string };
+      if (!response.ok || !data.sent) throw new Error(data.error ?? "SMTP test send failed");
+      setEmailTestState(`Sent successfully to ${data.accepted?.join(", ") || recipient}.`);
+    } catch (error) {
+      setEmailTestState(error instanceof Error ? error.message : "SMTP test send failed.");
+    }
+  };
+
+  const previewAiEmail = async () => {
+    const device = devices[0];
+    if (!device) {
+      setAiTestState("Add a device before previewing a fault email.");
+      setAiPreview(null);
+      return;
+    }
+    setAiTestState("Composing preview from the latest device checks...");
+    try {
+      const response = await fetch("/api/monitoring/ai", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          deviceName: device.name,
+          ipAddress: device.ip,
+          status: device.status === "Online" ? "Warning" : device.status,
+          severity: device.status === "Offline" ? "critical" : "warning",
+          probe: "ping",
+          provider: settingsState.aiProvider,
+          model: settingsState.aiModel,
+          instruction: settingsState.aiInstruction,
+        }),
+      });
+      const data = await response.json() as { message?: { subject: string; body: string; provider: string; model: string; synthesized: boolean }; error?: string };
+      if (!response.ok || !data.message) throw new Error(data.error ?? "AI preview failed");
+      setAiPreview(data.message);
+      setAiTestState(data.message.synthesized ? "Preview composed successfully. No email was sent." : "Provider was unavailable or no API key is configured; showing the rule-based fallback.");
+    } catch (error) {
+      setAiPreview(null);
+      setAiTestState(error instanceof Error ? error.message : "AI preview failed.");
+    }
   };
 
   /* ---------------- auth / org flows: unchanged API process ---------------- */
@@ -594,8 +801,8 @@ export default function NetworkAutomationEditor() {
     }
   };
 
-  /* ---------------- workflow library persistence (localStorage store) ---------------- */
-  const persistWorkflowLibrary = (next: SavedWorkflow[]) => saveWorkflows(next);
+  /* ---------------- workflow library persistence (database-backed) ---------------- */
+  const persistWorkflowLibrary = (next: SavedWorkflow[]) => setWorkflowLibrary(next);
 
   /** Best-effort server copy so saved workflows are inspectable via the API. */
   const syncWorkflowToServer = async (workflow: SavedWorkflow) => {
@@ -614,6 +821,7 @@ export default function NetworkAutomationEditor() {
             id: node.id,
             kind: node.type,
             name: node.name,
+            ...(node.icon ? { icon: node.icon } : {}),
             ...(node.config ? { config: node.config } : {}),
           })),
         }),
@@ -694,14 +902,19 @@ export default function NetworkAutomationEditor() {
   const deleteWorkflow = (id: string) => {
     const next = workflowLibrary.filter((workflow) => workflow.id !== id);
     persistWorkflowLibrary(next);
-    if (activeWorkflowId === id) {
-      setActiveWorkflowId(null);
-      setSavedSnapshot(null);
-      setWorkflowView("library");
-      setNodes([]);
-      setSelectedNode("");
-    }
-    showNotice("Workflow deleted.");
+    void fetch(`/api/automations?id=${encodeURIComponent(id)}`, { method: "DELETE" })
+      .then((response) => {
+        if (!response.ok) throw new Error("Delete failed");
+        if (activeWorkflowId === id) {
+          setActiveWorkflowId(null);
+          setSavedSnapshot(null);
+          setWorkflowView("library");
+          setNodes([]);
+          setSelectedNode("");
+        }
+        showNotice("Workflow deleted.");
+      })
+      .catch(() => showNotice("Workflow removed from the editor, but the server delete request failed."));
   };
 
   const duplicateWorkflow = (workflow: SavedWorkflow) => {
@@ -723,12 +936,23 @@ export default function NetworkAutomationEditor() {
     provider: aiProvider,
     models: aiModels,
     keys: aiKeys,
+    keyConfigured: Boolean(settingsState.aiProviderConfigurations.find((configuration) => configuration.provider === aiProvider.toLowerCase())?.apiKeyConfigured),
     baseUrls: aiBaseUrls,
     keyState: aiKeyState,
     instruction: aiInstruction,
     onProviderChange: (nodeId: string, provider: string) => {
       setAiProvider(provider);
       setAiKeyState("");
+      const normalizedProvider = provider.toLowerCase();
+      const savedConfiguration = settingsState.aiProviderConfigurations.find((configuration) => configuration.provider === normalizedProvider);
+      const selectedModel = savedConfiguration?.model ?? aiModels[provider] ?? "";
+      setSettingsState((current) => ({
+        ...current,
+        aiProvider: normalizedProvider,
+        aiModel: selectedModel,
+        aiApiKeyConfigured: Boolean(savedConfiguration?.apiKeyConfigured),
+      }));
+      monitoringSettingsDirty.current = true;
       setNodes((cur) => cur.map((n) => n.id === nodeId
         ? { ...n, config: { ...n.config, provider, model: aiModels[provider] ?? "" } }
         : n
@@ -744,6 +968,8 @@ export default function NetworkAutomationEditor() {
     },
     onModelChange: (nodeId: string, model: string) => {
       setAiModels((cur) => ({ ...cur, [aiProvider]: model }));
+      setSettingsState((current) => ({ ...current, aiModel: model }));
+      monitoringSettingsDirty.current = true;
       setNodes((cur) => cur.map((n) => n.id === nodeId
         ? { ...n, config: { ...n.config, provider: aiProvider, model } }
         : n
@@ -752,17 +978,61 @@ export default function NetworkAutomationEditor() {
     onBaseUrlChange: (value: string) => setAiBaseUrls({ Custom: value }),
     onInstructionChange: (nodeId: string, value: string) => {
       setAiInstruction(value);
+      setSettingsState((current) => ({ ...current, aiInstruction: value }));
+      monitoringSettingsDirty.current = true;
       setNodes((cur) => cur.map((n) => n.id === nodeId
         ? { ...n, config: { ...n.config, instruction: value } }
         : n
       ));
     },
-    onSaveKey: () => setAiKeyState(aiKeys[aiProvider] ? `${aiProvider} API key added to this node.` : "Add an API key before saving this AI connection."),
+    onSaveKey: async () => {
+      const apiKey = aiKeys[aiProvider]?.trim();
+      const selectedProviderConfigured = settingsState.aiProviderConfigurations.some((configuration) => configuration.provider === aiProvider.toLowerCase() && configuration.apiKeyConfigured);
+      if (!apiKey && !selectedProviderConfigured) {
+        setAiKeyState("Enter an API key before saving this AI connection.");
+        return;
+      }
+      setAiKeyState("Saving AI settings...");
+      try {
+        const response = await fetch("/api/monitoring/settings", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            aiProvider: aiProvider.toLowerCase(),
+            aiModel: aiModels[aiProvider] ?? "",
+            aiInstruction,
+            ...(apiKey ? { aiApiKey: apiKey } : {}),
+          }),
+        });
+        const data = await response.json() as { settings?: Record<string, unknown>; error?: string };
+        if (!response.ok) throw new Error(data.error ?? "AI settings could not be saved");
+        setSettingsState((current) => ({
+          ...current,
+          aiProvider: aiProvider.toLowerCase(),
+          aiModel: aiModels[aiProvider] ?? "",
+          aiInstruction,
+          aiApiKey: "",
+          aiApiKeyConfigured: Boolean(data.settings?.aiApiKeyConfigured ?? current.aiApiKeyConfigured),
+          aiProviderConfigurations: Array.isArray(data.settings?.aiProviderConfigurations)
+            ? data.settings.aiProviderConfigurations as SettingsForm["aiProviderConfigurations"]
+            : current.aiProviderConfigurations,
+        }));
+        setAiKeys((current) => ({ ...current, [aiProvider]: "" }));
+        setAiKeyState(`Saved ${aiProvider} settings for this organization.`);
+        monitoringSettingsDirty.current = false;
+      } catch (error) {
+        setAiKeyState(error instanceof Error ? error.message : "AI settings could not be saved.");
+      }
+    },
   };
 
   const smtpController = {
+    host: settingsState.smtpHost,
+    port: settingsState.smtpPort,
+    secure: settingsState.smtpSecure,
     user: smtpUser,
     appPassword: smtpAppPassword,
+    passwordConfigured: settingsState.smtpPasswordConfigured,
     from: smtpFrom,
     recipients: smtpRecipients,
     state: smtpState,
@@ -857,10 +1127,30 @@ export default function NetworkAutomationEditor() {
       return (
         <SettingsPanel
           settings={settingsState}
-          onSettingsChange={(patch) => setSettingsState((current) => ({ ...current, ...patch }))}
+          onSettingsChange={(patch) => {
+            monitoringSettingsDirty.current = true;
+            setSettingsState((current) => ({
+              ...current,
+              ...patch,
+              ...(patch.aiProvider !== undefined
+                ? { aiApiKeyConfigured: Boolean(current.aiProviderConfigurations.find((configuration) => configuration.provider === patch.aiProvider)?.apiKeyConfigured) }
+                : {}),
+            }));
+            if (patch.aiProvider !== undefined) setAiProvider(aiProviderLabel(patch.aiProvider));
+            if (patch.aiModel !== undefined) setAiModels((current) => ({ ...current, [aiProviderLabel(settingsState.aiProvider)]: patch.aiModel ?? "" }));
+            if (patch.aiInstruction !== undefined) setAiInstruction(patch.aiInstruction);
+            if (patch.smtpUser !== undefined) setSmtpUser(patch.smtpUser);
+            if (patch.smtpFrom !== undefined) setSmtpFrom(patch.smtpFrom);
+            if (patch.adminEmail !== undefined) setSmtpRecipients(patch.adminEmail);
+          }}
           workflowName={workflowName}
           onWorkflowNameChange={handleWorkflowNameChange}
           onSaveSettings={saveMonitoringSettings}
+          onTestAi={previewAiEmail}
+          onTestEmail={sendTestEmail}
+          emailTestState={emailTestState}
+          aiTestState={aiTestState}
+          aiPreview={aiPreview}
         />
       );
     }

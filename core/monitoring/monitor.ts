@@ -30,22 +30,13 @@ export type MonitorOutcome = {
   email: { to: string; status: string; detail?: string } | null;
 };
 
-const FAILURE_ESCALATION: Array<{ at: number; status: NetworkDevice["status"] }> = [
-  { at: 2, status: "Warning" },
-  { at: 3, status: "Offline" },
-];
-
 class NetworkMonitor {
-  private readonly failureCounts = new Map<string, number>();
-
-  private evaluateStatus(device: NetworkDevice, ok: boolean, latencyMs: number | null, packetLossPercent: number, settings: { latencyWarningMs: number; packetLossWarningPercent: number }): NetworkDevice["status"] {
+  private evaluateStatus(device: NetworkDevice, ok: boolean, consecutiveFailures: number, latencyMs: number | null, packetLossPercent: number, settings: { latencyWarningMs: number; packetLossWarningPercent: number; failureThreshold?: number }): NetworkDevice["status"] {
     if (!ok) {
-      const failures = (this.failureCounts.get(device.id) ?? 0) + 1;
-      this.failureCounts.set(device.id, failures);
-      const escalated = FAILURE_ESCALATION.filter((stage) => failures >= stage.at).pop();
-      return escalated?.status ?? "Warning";
+      const threshold = Math.max(1, Number(settings.failureThreshold ?? 3));
+      if (consecutiveFailures >= threshold) return "Offline";
+      return "Warning";
     }
-    this.failureCounts.delete(device.id);
     if ((latencyMs ?? 0) > settings.latencyWarningMs) return "Warning";
     if (packetLossPercent >= settings.packetLossWarningPercent) return "Warning";
     return "Online";
@@ -75,7 +66,19 @@ class NetworkMonitor {
   async processCheck(organizationId: string, device: NetworkDevice, kind: CheckRow["probe"], options: { port?: number; community?: string; notify?: boolean } = {}): Promise<MonitorOutcome> {
     const settings = await tenantMonitorStore.getSettings(organizationId);
     const probe = await runProbe(kind, device.ip, options);
-    const status = this.evaluateStatus(device, probe.ok, probe.latencyMs, probe.packetLossPercent, settings);
+    const recentChecks = await tenantMonitorStore.listChecks(organizationId, { deviceId: device.id, limit: Math.max(1, settings.failureThreshold) });
+    let consecutiveFailures = probe.ok ? 0 : 1;
+    if (!probe.ok) {
+      for (const previous of recentChecks) {
+        if (previous.probe !== kind || previous.ok) break;
+        consecutiveFailures += 1;
+      }
+    }
+    const status = this.evaluateStatus(device, probe.ok, consecutiveFailures, probe.latencyMs, probe.packetLossPercent, {
+      latencyWarningMs: settings.latencyWarningMs,
+      packetLossWarningPercent: settings.packetLossWarningPercent,
+      failureThreshold: settings.failureThreshold,
+    });
 
     const bandwidthIn = probe.snmp?.interfaces?.[0]?.inOctetsPerSecond ? (probe.snmp.interfaces[0].inOctetsPerSecond * 8) / 1_000_000 : null;
     const bandwidthOut = probe.snmp?.interfaces?.[0]?.outOctetsPerSecond ? (probe.snmp.interfaces[0].outOctetsPerSecond * 8) / 1_000_000 : null;
@@ -101,7 +104,8 @@ class NetworkMonitor {
     let message: MonitorOutcome["message"] = null;
     let email: MonitorOutcome["email"] = null;
 
-    if (status !== "Online" || probe.ok === false) {
+    const shouldCreateAlert = status !== "Online" && (status !== device.status || recentChecks.length === 0);
+    if (shouldCreateAlert) {
       const severity = alertSeverity(status, probe.latencyMs, probe.packetLossPercent, settings);
       const payload = this.buildAlert(device, check, severity, status);
       alert = await tenantMonitorStore.saveAlert(organizationId, {
@@ -118,16 +122,24 @@ class NetworkMonitor {
 
       if (options.notify !== false) {
         message = await synthesizeFaultMessage(
-          { device: payload.device, severity: payload.severity, status: payload.status, probe: kind, checks: history, instruction: settings.aiInstruction },
-          { provider: settings.aiProvider, model: settings.aiModel },
+          {
+            device: payload.device,
+            severity: payload.severity,
+            status: payload.status,
+            probe: kind,
+            checks: history,
+            instruction: settings.aiInstruction,
+            recommendation: payload.recommendation,
+          },
+          { provider: settings.aiProvider, model: settings.aiModel, apiKey: await tenantMonitorStore.getAiApiKey(organizationId) },
         );
-        const smtp = smtpConfigFromEnv();
+        const smtp = await tenantMonitorStore.getSmtpConfig(organizationId) ?? smtpConfigFromEnv();
         const recipient = settings.adminEmail || process.env.ADMIN_EMAIL;
         if (smtp && recipient) {
           try {
             const sent = await sendFaultEmail(smtp, {
               to: recipient,
-              subject: renderTemplate("[Network Alert] {{deviceName}} is {{status}}", { deviceName: device.name, status }),
+              subject: message.subject || renderTemplate("[Network Alert] {{deviceName}} is {{status}}", { deviceName: device.name, status }),
               text: message.body,
             });
             email = { to: recipient, status: "sent", detail: sent.messageId };

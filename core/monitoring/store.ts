@@ -1,15 +1,22 @@
 import { randomUUID } from "node:crypto";
 import { and, desc, eq } from "drizzle-orm";
 import { db } from "@/db/client";
+import { decryptCredential, encryptCredential } from "@/security/credentials";
+import type { SmtpConfig } from "@/core/monitoring/mailer";
 import {
+  aiProviderCredentials,
   monitoringAlerts,
   monitoringChecks,
   monitoringSettings,
   networkDevices,
+  organizationSmtpSettings,
 } from "@/db/schema";
 import type { AlertSeverity, CheckRow, MonitoringSettings, NetworkAlert, NetworkDevice, ProbeKind } from "@/core/monitoring/types";
 
 type DeviceRow = typeof networkDevices.$inferSelect;
+type MonitoringSettingsRow = typeof monitoringSettings.$inferSelect;
+type AiCredentialRow = typeof aiProviderCredentials.$inferSelect;
+type SmtpSettingsRow = typeof organizationSmtpSettings.$inferSelect;
 type CheckInsert = typeof monitoringChecks.$inferInsert;
 type AlertInsert = typeof monitoringAlerts.$inferInsert;
 
@@ -61,18 +68,32 @@ function toAlert(row: typeof monitoringAlerts.$inferSelect): NetworkAlert {
   };
 }
 
-function toSettings(organizationId: string, row: typeof monitoringSettings.$inferSelect | undefined): MonitoringSettings {
+function toSettings(organizationId: string, row: MonitoringSettingsRow | undefined, aiCredentials: AiCredentialRow[], smtp?: SmtpSettingsRow): MonitoringSettings {
+  const provider = row?.aiProvider ?? "gemini";
+  const selectedAiCredential = aiCredentials.find((credential) => credential.provider === provider);
   return {
     organizationId,
-    intervalSeconds: row?.intervalSeconds ?? 30,
+    intervalSeconds: Math.max(60, row?.intervalSeconds ?? 60),
     failureThreshold: row?.failureThreshold ?? 3,
     latencyWarningMs: row?.latencyWarningMs ?? 500,
     packetLossWarningPercent: row?.packetLossWarning ?? 10,
     bandwidthWarningMbps: row?.bandwidthWarning ?? 0,
     adminEmail: row?.adminEmail ?? "",
     aiProvider: row?.aiProvider ?? "gemini",
-    aiModel: row?.aiModel ?? "gemini-2.5-flash",
+    aiModel: selectedAiCredential?.model ?? "gemini-2.5-flash",
     aiInstruction: row?.aiInstruction ?? "Write a concise, professional network fault notification. Include the affected device, IP, severity, evidence and recommended action.",
+    aiApiKeyConfigured: Boolean(selectedAiCredential?.apiKeyEncrypted),
+    aiProviderConfigurations: aiCredentials.map((credential) => ({
+      provider: credential.provider,
+      model: credential.model,
+      apiKeyConfigured: Boolean(credential.apiKeyEncrypted),
+    })),
+    smtpHost: smtp?.host ?? "smtp.gmail.com",
+    smtpPort: smtp?.port ?? 465,
+    smtpSecure: smtp?.secure ?? true,
+    smtpUser: smtp?.username ?? "",
+    smtpFrom: smtp?.fromAddress ?? "",
+    smtpPasswordConfigured: Boolean(smtp?.passwordEncrypted),
     updatedAt: row?.updatedAt.toISOString() ?? new Date().toISOString(),
   };
 }
@@ -96,7 +117,7 @@ class TenantMonitorStore {
       subnet: input.subnet ?? "",
       mac: input.mac ?? "",
       type: (input.type as NetworkDevice["type"]) ?? "router",
-      status: "Online",
+      status: "Warning",
       createdAt: new Date().toISOString(),
     };
     await db().insert(networkDevices).values({
@@ -191,13 +212,82 @@ class TenantMonitorStore {
   }
 
   async getSettings(organizationId: string): Promise<MonitoringSettings> {
-    const rows = await db().select().from(monitoringSettings).where(eq(monitoringSettings.organizationId, organizationId)).limit(1);
-    return toSettings(organizationId, rows[0]);
+    const settingsRows = await db().select().from(monitoringSettings).where(eq(monitoringSettings.organizationId, organizationId)).limit(1);
+    const row = settingsRows[0];
+    const [aiRows, smtpRows] = await Promise.all([
+      db().select().from(aiProviderCredentials).where(eq(aiProviderCredentials.organizationId, organizationId)),
+      db().select().from(organizationSmtpSettings).where(eq(organizationSmtpSettings.organizationId, organizationId)).limit(1),
+    ]);
+    return toSettings(organizationId, row, aiRows, smtpRows[0]);
+  }
+
+  async getAiApiKey(organizationId: string, provider?: string): Promise<string | undefined> {
+    const selectedProvider = provider ?? (await this.getSettings(organizationId)).aiProvider;
+    const rows = await db().select({ encrypted: aiProviderCredentials.apiKeyEncrypted }).from(aiProviderCredentials).where(and(eq(aiProviderCredentials.organizationId, organizationId), eq(aiProviderCredentials.provider, selectedProvider.toLowerCase()))).limit(1);
+    return rows[0]?.encrypted ? decryptCredential(rows[0].encrypted) : undefined;
+  }
+
+  async saveAiProviderSettings(organizationId: string, provider: string, model: string, apiKey?: string, removeApiKey = false): Promise<void> {
+    const normalizedProvider = provider.toLowerCase();
+    const existingRows = await db().select().from(aiProviderCredentials).where(and(eq(aiProviderCredentials.organizationId, organizationId), eq(aiProviderCredentials.provider, normalizedProvider))).limit(1);
+    const encrypted = removeApiKey ? null : apiKey?.trim() ? encryptCredential(apiKey.trim()) : existingRows[0]?.apiKeyEncrypted ?? null;
+    await db()
+      .insert(aiProviderCredentials)
+      .values({ organizationId, provider: normalizedProvider, model, apiKeyEncrypted: encrypted, updatedAt: new Date() })
+      .onConflictDoUpdate({
+        target: [aiProviderCredentials.organizationId, aiProviderCredentials.provider],
+        set: { model, apiKeyEncrypted: encrypted, updatedAt: new Date() },
+      });
+  }
+
+  async getSmtpConfig(organizationId: string): Promise<SmtpConfig | null> {
+    const rows = await db().select().from(organizationSmtpSettings).where(eq(organizationSmtpSettings.organizationId, organizationId)).limit(1);
+    const smtp = rows[0];
+    if (!smtp?.username || !smtp.passwordEncrypted) return null;
+    return {
+      host: smtp.host,
+      port: smtp.port,
+      secure: smtp.secure,
+      user: smtp.username,
+      password: decryptCredential(smtp.passwordEncrypted),
+      from: smtp.fromAddress || smtp.username,
+    };
+  }
+
+  async saveSmtpSettings(organizationId: string, input: Partial<MonitoringSettings>, password?: string, removePassword = false): Promise<void> {
+    const existingRows = await db().select().from(organizationSmtpSettings).where(eq(organizationSmtpSettings.organizationId, organizationId)).limit(1);
+    const existing = existingRows[0];
+    const encrypted = removePassword ? null : password?.trim() ? encryptCredential(password.trim()) : existing?.passwordEncrypted ?? null;
+    await db()
+      .insert(organizationSmtpSettings)
+      .values({
+        organizationId,
+        host: input.smtpHost ?? existing?.host ?? "smtp.gmail.com",
+        port: input.smtpPort ?? existing?.port ?? 465,
+        secure: input.smtpSecure ?? existing?.secure ?? true,
+        username: input.smtpUser ?? existing?.username ?? "",
+        fromAddress: input.smtpFrom ?? existing?.fromAddress ?? "",
+        passwordEncrypted: encrypted,
+        updatedAt: new Date(),
+      })
+      .onConflictDoUpdate({
+        target: organizationSmtpSettings.organizationId,
+        set: {
+          host: input.smtpHost ?? existing?.host ?? "smtp.gmail.com",
+          port: input.smtpPort ?? existing?.port ?? 465,
+          secure: input.smtpSecure ?? existing?.secure ?? true,
+          username: input.smtpUser ?? existing?.username ?? "",
+          fromAddress: input.smtpFrom ?? existing?.fromAddress ?? "",
+          passwordEncrypted: encrypted,
+          updatedAt: new Date(),
+        },
+      });
   }
 
   async saveSettings(organizationId: string, input: Partial<MonitoringSettings>): Promise<MonitoringSettings> {
     const current = await this.getSettings(organizationId);
     const next: MonitoringSettings = { ...current, ...input, organizationId, updatedAt: new Date().toISOString() };
+    next.intervalSeconds = Math.max(60, Math.floor(Number(next.intervalSeconds) || 60));
     await db()
       .insert(monitoringSettings)
       .values({
@@ -209,7 +299,6 @@ class TenantMonitorStore {
         bandwidthWarning: next.bandwidthWarningMbps,
         adminEmail: next.adminEmail,
         aiProvider: next.aiProvider,
-        aiModel: next.aiModel,
         aiInstruction: next.aiInstruction,
         updatedAt: new Date(next.updatedAt),
       })
@@ -223,7 +312,6 @@ class TenantMonitorStore {
           bandwidthWarning: next.bandwidthWarningMbps,
           adminEmail: next.adminEmail,
           aiProvider: next.aiProvider,
-          aiModel: next.aiModel,
           aiInstruction: next.aiInstruction,
           updatedAt: new Date(next.updatedAt),
         },

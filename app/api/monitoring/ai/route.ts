@@ -44,7 +44,11 @@ export async function POST(request: Request) {
         checks,
         instruction: body.instruction ?? settings.aiInstruction,
       },
-      { provider: body.provider ?? settings.aiProvider, model: body.model ?? settings.aiModel },
+      {
+        provider: body.provider ?? settings.aiProvider,
+        model: body.model ?? settings.aiModel,
+        apiKey: await tenantMonitorStore.getAiApiKey(organizationId),
+      },
     );
     return NextResponse.json({ message });
   } catch (error) {

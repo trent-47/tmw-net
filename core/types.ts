@@ -21,6 +21,7 @@ export type WorkflowNode = {
   id: string;
   kind: NodeKind;
   name: string;
+  icon?: string;
   capability?: string;
   config?: Record<string, unknown>;
 };

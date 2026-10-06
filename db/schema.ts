@@ -180,13 +180,44 @@ export const monitoringSettings = pgTable(
     bandwidthWarning: doublePrecision("bandwidth_warning").notNull().default(0),
     adminEmail: text("admin_email").notNull().default(""),
     aiProvider: text("ai_provider").notNull().default("gemini"),
-    aiModel: text("ai_model").notNull().default("gemini-2.5-flash"),
     aiInstruction: text("ai_instruction").notNull().default(""),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
     // monitoring_settings PK is organization_id; no extra index needed.
   }),
+);
+
+export const aiProviderCredentials = pgTable(
+  "ai_provider_credentials",
+  {
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    provider: text("provider").notNull(),
+    model: text("model").notNull(),
+    apiKeyEncrypted: text("api_key_encrypted"),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.organizationId, table.provider] }),
+  }),
+);
+
+export const organizationSmtpSettings = pgTable(
+  "organization_smtp_settings",
+  {
+    organizationId: text("organization_id")
+      .primaryKey()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    host: text("host").notNull().default("smtp.gmail.com"),
+    port: integer("port").notNull().default(465),
+    secure: boolean("secure").notNull().default(true),
+    username: text("username").notNull().default(""),
+    fromAddress: text("from_address").notNull().default(""),
+    passwordEncrypted: text("password_encrypted"),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
 );
 
 /* ------------------------------------------------------------------ */
@@ -224,6 +255,7 @@ export const workflowNodes = pgTable(
     organizationId: text("organization_id").notNull(),
     kind: text("kind").notNull(),
     name: text("name").notNull(),
+    icon: text("icon").notNull().default("zap"),
     capability: text("capability"),
     config: jsonb("config"),
     position: integer("position").notNull().default(0),

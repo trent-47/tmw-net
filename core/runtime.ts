@@ -42,14 +42,20 @@ automationEngine.registerCapability({ name: "ai_fault_message", description: "Sy
       probe: String(input.probe ?? "ping"),
       checks,
       instruction: String(input.instruction ?? settings.aiInstruction),
+      recommendation: String(input.recommendation ?? "Diagnose the latest monitoring evidence and recommend the next specific troubleshooting step."),
     },
-    { provider: String(input.provider ?? settings.aiProvider), model: String(input.model ?? settings.aiModel) },
+    {
+      provider: String(input.provider ?? settings.aiProvider),
+      model: String(input.model ?? settings.aiModel),
+      apiKey: await tenantMonitorStore.getAiApiKey(organizationId),
+    },
   );
   return { ...input, subject: message.subject, body: message.body, provider: message.provider, model: message.model, synthesized: message.synthesized };
 });
 
 automationEngine.registerCapability({ name: "send_admin_email", description: "Send the fault message to the administrator through SMTP", input: {}, output: {} }, async (input) => {
-  const smtp = smtpConfigFromEnv();
+  const organizationId = String(input.organizationId ?? "local-workspace");
+  const smtp = await tenantMonitorStore.getSmtpConfig(organizationId) ?? smtpConfigFromEnv();
   const to = String(input.to ?? process.env.ADMIN_EMAIL ?? "");
   if (!smtp) return { ...input, emailStatus: "not-configured", detail: "Set SMTP_USER and SMTP_PASSWORD to enable dispatch" };
   if (!to) return { ...input, emailStatus: "missing-recipient", detail: "No admin email configured" };

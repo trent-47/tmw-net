@@ -9,6 +9,7 @@ export type AiController = {
   provider: string;
   models: Record<string, string>;
   keys: Record<string, string>;
+  keyConfigured: boolean;
   baseUrls: Record<string, string>;
   keyState: string;
   instruction: string;
@@ -21,8 +22,12 @@ export type AiController = {
 };
 
 export type SmtpController = {
+  host: string;
+  port: string;
+  secure: boolean;
   user: string;
   appPassword: string;
+  passwordConfigured: boolean;
   from: string;
   recipients: string;
   state: string;
@@ -137,7 +142,7 @@ export function NodeInspector({ node, tab, onTabChange, onRename, onConfigChange
                     <div className="ai-provider-mark"><Sparkles size={18} /></div>
                     <div>
                       <strong>{ai.provider} API connection</strong>
-                      <small>API keys are represented in the editor; production secrets should be stored server-side.</small>
+                      <small>{ai.keyConfigured ? "Organization API key is saved securely on the server." : "No organization API key is saved yet."}</small>
                     </div>
                   </div>
 
@@ -151,7 +156,7 @@ export function NodeInspector({ node, tab, onTabChange, onRename, onConfigChange
                         placeholder={`Paste ${ai.provider} API key`}
                         autoComplete="off"
                       />
-                      <CheckCircle2 size={16} className={ai.keys[ai.provider] ? "credential-ok" : ""} />
+                      <CheckCircle2 size={16} className={ai.keys[ai.provider] || ai.keyConfigured ? "credential-ok" : ""} />
                     </div>
                   </label>
 
@@ -180,7 +185,7 @@ export function NodeInspector({ node, tab, onTabChange, onRename, onConfigChange
                     className="btn primary full"
                     onClick={ai.onSaveKey}
                   >
-                    {ai.keys[ai.provider] ? "API key added" : "Add API key"}
+                    {ai.keyState.startsWith("Saving") ? "Saving..." : ai.keyConfigured && !ai.keys[ai.provider] ? "AI settings saved" : "Save AI settings"}
                   </button>
                   {ai.keyState && <small className="field-note">{ai.keyState}</small>}
                 </div>
@@ -211,13 +216,13 @@ export function NodeInspector({ node, tab, onTabChange, onRename, onConfigChange
             {node.name === "Send Gmail" && (
               <form className="credential-form" onSubmit={smtp.onSubmit}>
                 <div className="field-note">Nodemailer / Google SMTP</div>
-                <label>SMTP host<input value="smtp.gmail.com" readOnly /></label>
+                <label>SMTP host<input value={smtp.host} readOnly /></label>
                 <div className="form-grid-2">
-                  <label>Port<input value="465" readOnly /></label>
-                  <label>Secure<input value="true" readOnly /></label>
+                  <label>Port<input value={smtp.port} readOnly /></label>
+                  <label>TLS<input value={smtp.secure ? "Implicit TLS" : "STARTTLS"} readOnly /></label>
                 </div>
                 <label>Google / Gmail account<input type="email" value={smtp.user} onChange={(e) => smtp.onUserChange(e.target.value)} placeholder="monitoring@gmail.com" required /></label>
-                <label>Google App Password<input type="password" value={smtp.appPassword} onChange={(e) => smtp.onAppPasswordChange(e.target.value)} placeholder="16-character app password" required /></label>
+                <label>Google App Password<input type="password" value={smtp.appPassword} onChange={(e) => smtp.onAppPasswordChange(e.target.value)} placeholder={smtp.passwordConfigured ? "Saved securely; enter to replace" : "16-character app password"} required={!smtp.passwordConfigured} /></label>
                 <label>From<input value={smtp.from} onChange={(e) => smtp.onFromChange(e.target.value)} /></label>
                 <div className="admin-recipient"><CheckCircle2 size={15} /><span>Automatic recipient: <strong>{smtp.adminEmail}</strong></span></div>
                 <label>Admin Gmail recipient<input value={smtp.recipients || smtp.adminEmail} onChange={(e) => smtp.onRecipientsChange(e.target.value)} placeholder={smtp.adminEmail} /></label>

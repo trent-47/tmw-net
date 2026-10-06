@@ -30,38 +30,21 @@ function emitWorkflows() {
   workflowListeners.forEach((listener) => listener());
 }
 
-export function subscribeWorkflows(listener: () => void) {
-  workflowListeners.add(listener);
-  const onStorage = (event: StorageEvent) => {
-    if (event.key && event.key !== WORKFLOW_KEY) return;
-    workflowSnapshot = null;
-    emitWorkflows();
-  };
-  window.addEventListener("storage", onStorage);
-  return () => {
-    workflowListeners.delete(listener);
-    window.removeEventListener("storage", onStorage);
-  };
+export function subscribeWorkflows(_listener: () => void) {
+  return () => undefined;
 }
 
 export function getWorkflowsSnapshot(): SavedWorkflow[] {
-  if (workflowSnapshot === null) workflowSnapshot = readWorkflows();
-  return workflowSnapshot;
+  return EMPTY_WORKFLOWS;
 }
 
 export function getWorkflowsServerSnapshot(): SavedWorkflow[] {
   return EMPTY_WORKFLOWS;
 }
 
-/** Persists the whole workflow library to localStorage and notifies readers. */
-export function saveWorkflows(next: SavedWorkflow[]) {
-  workflowSnapshot = next;
-  try {
-    window.localStorage.setItem(WORKFLOW_KEY, JSON.stringify(next));
-  } catch {
-    /* storage may be unavailable (private mode); the in-memory snapshot still works */
-  }
-  emitWorkflows();
+/** Workflow persistence now lives in the NetMoni database through server routes. */
+export function saveWorkflows(_next: SavedWorkflow[]) {
+  return undefined;
 }
 
 /* ---------------- editor theme ---------------- */
