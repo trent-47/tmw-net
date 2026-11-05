@@ -22,13 +22,13 @@ export type SavedWorkflow = {
 
 export type EntryStage = "login" | "organization" | "editor";
 
-export type EditorSection = "Overview" | "Workflows" | "Executions" | "Devices" | "Alerts" | "Settings";
+export type EditorSection = "Overview" | "Workflows" | "Executions" | "Devices" | "Alerts" | "Reports" | "Settings";
 
 export type Viewport = { x: number; y: number; zoom: number };
 
 export type NodeLibraryItem = { type: NodeType; name: string; description: string; icon: string };
 
-export type DeviceEntry = { name: string; ip: string; subnet: string; mac: string; type: string; status: string };
+export type DeviceEntry = { id?: string; name: string; ip: string; subnet: string; mac: string; type: string; status: string };
 
 export type DeviceForm = { name: string; ip: string; subnet: string; mac: string; type: string };
 export type DeviceTestState = {

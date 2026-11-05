@@ -58,6 +58,8 @@ function buildPrompt(context: AiFaultContext): string {
     "",
     context.instruction?.trim() || DEFAULT_INSTRUCTION,
     "",
+    "Format the message body in clean Markdown: use short headings, bold labels, and bullet lists where helpful. Do not output raw HTML or JSON.",
+    "",
     "Reply with a short subject line on the first line prefixed with 'Subject:' and then the message body.",
   ];
   return lines.join("\n");

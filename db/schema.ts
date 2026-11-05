@@ -160,6 +160,8 @@ export const monitoringAlerts = pgTable(
     recommendation: text("recommendation").notNull().default(""),
     evidence: jsonb("evidence").notNull().default({}),
     emailStatus: text("email_status").notNull().default("pending"),
+    acknowledgedAt: timestamp("acknowledged_at", { withTimezone: true }),
+    lastNotifiedAt: timestamp("last_notified_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({

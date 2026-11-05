@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { sessionWorkspace } from "@/auth/store";
 import { tenantMonitorStore } from "@/core/monitoring/store";
+import { triggerRealtime } from "@/core/realtime";
 
 export const dynamic = "force-dynamic";
 
@@ -67,6 +68,7 @@ export async function POST(request: Request) {
       );
     }
     const updatedSettings = await tenantMonitorStore.getSettings(organizationId);
+    await triggerRealtime(organizationId, "settings.updated", { settings: updatedSettings });
     return NextResponse.json({ settings: updatedSettings });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "Could not save settings" }, { status: 400 });

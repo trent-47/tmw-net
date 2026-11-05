@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { sessionWorkspace } from "@/auth/store";
 import { networkMonitor } from "@/core/monitoring/monitor";
 import { tenantMonitorStore } from "@/core/monitoring/store";
+import { triggerRealtime } from "@/core/realtime";
 
 export const dynamic = "force-dynamic";
 
@@ -21,9 +22,27 @@ export async function POST(request: Request) {
     const organizationId = await sessionWorkspace(request);
     const device = await tenantMonitorStore.createDevice(organizationId, { name: body.name.trim(), ip: body.ip.trim(), subnet: body.subnet, mac: body.mac, type: body.type });
     const outcome = await networkMonitor.testDevice(organizationId, device, "ping");
+    await triggerRealtime(organizationId, "device.updated", { device: { ...device, status: outcome.status } });
     return NextResponse.json({ device: { ...device, status: outcome.status }, outcome }, { status: 201 });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "Could not add device" }, { status: 400 });
+  }
+}
+
+export async function PATCH(request: Request) {
+  try {
+    const body = await request.json() as { id?: string; ip?: string; name?: string };
+    if ((!body.id && !body.ip) || !body.name?.trim()) return NextResponse.json({ error: "Device id or ip and name are required" }, { status: 400 });
+    const organizationId = await sessionWorkspace(request);
+    const devices = await tenantMonitorStore.listDevices(organizationId);
+    const target = devices.find((device) => body.id ? device.id === body.id : device.ip === body.ip);
+    if (!target) return NextResponse.json({ error: "Device not found" }, { status: 404 });
+    const device = await tenantMonitorStore.updateDeviceName(organizationId, target.id, body.name.trim());
+    if (!device) return NextResponse.json({ error: "Device not found" }, { status: 404 });
+    await triggerRealtime(organizationId, "device.updated", { device });
+    return NextResponse.json({ device });
+  } catch (error) {
+    return NextResponse.json({ error: error instanceof Error ? error.message : "Could not rename device" }, { status: 400 });
   }
 }
 
@@ -38,6 +57,7 @@ export async function DELETE(request: Request) {
     const target = devices.find((device) => (deviceId ? device.id === deviceId : device.ip === ip));
     if (!target) return NextResponse.json({ error: "Device not found" }, { status: 404 });
     await tenantMonitorStore.deleteDevice(organizationId, target.id);
+    await triggerRealtime(organizationId, "device.updated", { deviceId: target.id, deleted: true });
     return NextResponse.json({ deleted: true });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "Could not remove device" }, { status: 400 });

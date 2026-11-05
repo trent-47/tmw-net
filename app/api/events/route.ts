@@ -1,9 +1,10 @@
 import { NextResponse } from "next/server";
-import { publishEvent, workflowRepository } from "@/core/runtime";
+import { normalizeWorkflowCapabilities, publishEvent, workflowRepository } from "@/core/runtime";
 import { sessionWorkspace } from "@/auth/store";
 import { automationEngine } from "@/core/registry";
 import { validateWorkflow } from "@/core/workflows/definition";
 import type { Workflow } from "@/core/types";
+import { triggerRealtime } from "@/core/realtime";
 
 export const dynamic = "force-dynamic";
 
@@ -33,6 +34,7 @@ export async function POST(request: Request) {
       workflow = await workflowRepository.findById("network-fault-notification", organizationId);
     }
     if (!workflow) return NextResponse.json({ error: "Workflow not found" }, { status: 404 });
+    workflow = { ...workflow, nodes: normalizeWorkflowCapabilities(workflow) };
 
     const executionEvent = {
       id: crypto.randomUUID(),
@@ -53,6 +55,7 @@ export async function POST(request: Request) {
       finishedAt: new Date(),
     });
     const executions = [{ workflowId: workflow.id, status: execution.status, output: execution.output }];
+    await triggerRealtime(organizationId, "workflow.executed", { event: executionEvent, executions });
     return NextResponse.json({ event: { type: body.type, occurredAt: new Date().toISOString() }, executions }, { status: 202 });
   }
 

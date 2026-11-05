@@ -1,7 +1,7 @@
 "use client";
 
-import type { FormEvent } from "react";
-import { Network, Plus, Trash2, X } from "lucide-react";
+import { useState, type FormEvent } from "react";
+import { Check, Network, Pencil, Plus, Trash2, X } from "lucide-react";
 import { DeviceGlyph } from "./node-canvas";
 import type { BackendResult, DeviceEntry, DeviceForm, DeviceTestState } from "./types";
 
@@ -15,12 +15,15 @@ type Props = {
   onFormChange: (patch: Partial<DeviceForm>) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   onRemove: (ip: string) => void;
+  onRename: (device: DeviceEntry, name: string) => Promise<void>;
   onTest: (device: DeviceEntry) => void;
   testState: DeviceTestState | null;
 };
 
 /** Registered network devices: add, probe and remove monitoring targets. */
-export function DevicesPanel({ devices, results, formOpen, form, onOpenForm, onCloseForm, onFormChange, onSubmit, onRemove, onTest, testState }: Props) {
+export function DevicesPanel({ devices, results, formOpen, form, onOpenForm, onCloseForm, onFormChange, onSubmit, onRemove, onRename, onTest, testState }: Props) {
+  const [editingId, setEditingId] = useState("");
+  const [editedName, setEditedName] = useState("");
   return (
     <section className="section-panel">
       <div className="section-panel-inner wide-panel">
@@ -32,11 +35,39 @@ export function DevicesPanel({ devices, results, formOpen, form, onOpenForm, onC
         <div className="device-registry">
           {devices.map((d) => <article className="device-row" key={d.ip}>
             <div className="device-node-icon"><DeviceGlyph type={d.type} size={24} /></div>
-            <div className="device-main"><strong>{d.name}</strong><small>{d.ip}</small></div>
+            <div className="device-main">
+              {editingId === (d.id || d.ip) ? (
+                <form
+                  className="device-name-edit"
+                  onSubmit={async (event) => {
+                    event.preventDefault();
+                    await onRename(d, editedName);
+                    setEditingId("");
+                  }}
+                >
+                  <input value={editedName} onChange={(event) => setEditedName(event.target.value)} aria-label={`Rename ${d.name}`} autoFocus required />
+                  <button className="icon-btn" type="submit" title="Save device name"><Check size={15} /></button>
+                  <button className="icon-btn" type="button" title="Cancel rename" onClick={() => setEditingId("")}><X size={15} /></button>
+                </form>
+              ) : (
+                <>
+                  <strong>{d.name}</strong>
+                  <small>{d.ip}</small>
+                </>
+              )}
+            </div>
             <div className="device-meta"><span>Subnet</span><strong>{d.subnet || "Not set"}</strong></div>
             <div className="device-meta"><span>MAC</span><strong>{d.mac || "Not set"}</strong></div>
             <div className={`device-status ${d.status.toLowerCase()}`}><span />{d.status}</div>
             <button className="btn ghost" title="Run ping test against this device" onClick={() => onTest(d)}>Test</button>
+            <button
+              className="icon-btn"
+              title="Rename device"
+              onClick={() => {
+                setEditingId(d.id || d.ip);
+                setEditedName(d.name);
+              }}
+            ><Pencil size={16} /></button>
             <button className="icon-btn danger" title="Remove device" onClick={() => onRemove(d.ip)}><Trash2 size={16} /></button>
           </article>)}
         </div>

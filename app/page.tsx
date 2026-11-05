@@ -10,6 +10,7 @@ import {
   ExecutionsPanel,
   NodeInspector,
   OverviewPanel,
+  ReportsPanel,
   SettingsPanel,
   WorkflowEditor,
   WorkflowLibrary,
@@ -321,12 +322,134 @@ export default function NetworkAutomationEditor() {
     };
     void loadWorkspace();
 
-    const poll = window.setInterval(loadWorkspace, 5_000);
+    const poll = window.setInterval(loadWorkspace, 30_000);
     return () => {
       cancelled = true;
       window.clearInterval(poll);
     };
   }, [authState]);
+
+  useEffect(() => {
+    if (authState !== "authenticated" || !organizationId) return;
+    const key = process.env.NEXT_PUBLIC_PUSHER_KEY;
+    const cluster = process.env.NEXT_PUBLIC_PUSHER_CLUSTER ?? "mt1";
+    if (!key) return;
+
+    let client: { disconnect: () => void } | null = null;
+    type RealtimeChannel = { bind: (event: string, callback: (data: Record<string, unknown>) => void) => void; unsubscribe: () => void };
+    type RealtimeClient = { subscribe: (channelName: string) => RealtimeChannel; disconnect: () => void };
+    let channel: RealtimeChannel | null = null;
+    let cancelled = false;
+
+    const refreshRealtimeData = async () => {
+      const [deviceResponse, resultResponse, alertResponse, workflowResponse] = await Promise.all([
+        fetch("/api/monitoring/devices", { cache: "no-store" }),
+        fetch("/api/monitoring/results?limit=50", { cache: "no-store" }),
+        fetch("/api/monitoring/alerts", { cache: "no-store" }),
+        fetch("/api/automations", { cache: "no-store" }),
+      ]);
+      if (cancelled) return;
+      if (deviceResponse.ok) {
+        const data = await deviceResponse.json() as { devices?: Array<Record<string, unknown>> };
+        setDevices((data.devices ?? []).map((device) => ({
+          id: String(device.id ?? ""),
+          name: String(device.name ?? ""),
+          ip: String(device.ip ?? ""),
+          subnet: String(device.subnet ?? ""),
+          mac: String(device.mac ?? ""),
+          type: String(device.type ?? "router"),
+          status: String(device.status ?? "Online"),
+        })));
+      }
+      if (resultResponse.ok) {
+        const data = await resultResponse.json() as { results?: Array<Record<string, unknown>> };
+        setBackendResults((data.results ?? []).map((result) => ({
+          id: String(result.id ?? ""),
+          deviceName: String(result.deviceName ?? ""),
+          ipAddress: String(result.ipAddress ?? ""),
+          probe: String(result.probe ?? "ping"),
+          ok: Boolean(result.ok),
+          latencyMs: result.latencyMs === null || result.latencyMs === undefined ? null : Number(result.latencyMs),
+          packetLossPercent: Number(result.packetLossPercent ?? 0),
+          bandwidthInMbps: result.bandwidthInMbps === null || result.bandwidthInMbps === undefined ? null : Number(result.bandwidthInMbps),
+          bandwidthOutMbps: result.bandwidthOutMbps === null || result.bandwidthOutMbps === undefined ? null : Number(result.bandwidthOutMbps),
+          checkedAt: String(result.checkedAt ?? ""),
+        })));
+      }
+      if (alertResponse.ok) {
+        const data = await alertResponse.json() as { alerts?: Array<Record<string, unknown>> };
+        setBackendAlerts((data.alerts ?? []).map((alert) => ({
+          id: String(alert.id ?? ""),
+          deviceName: String(alert.deviceName ?? ""),
+          ipAddress: String(alert.ipAddress ?? ""),
+          severity: String(alert.severity ?? "warning"),
+          status: String(alert.status ?? ""),
+          summary: String(alert.summary ?? ""),
+          emailStatus: String(alert.emailStatus ?? "pending"),
+          createdAt: String(alert.createdAt ?? ""),
+        })));
+      }
+      if (workflowResponse.ok) {
+        const data = await workflowResponse.json() as { workflows?: Array<Record<string, unknown>> };
+        setWorkflowLibrary((data.workflows ?? []).map((workflow, index) => {
+          const workflowNodes = Array.isArray(workflow.nodes) ? workflow.nodes as Array<Record<string, unknown>> : [];
+          return {
+            id: String(workflow.id ?? `workflow-${index}`),
+            name: String(workflow.name ?? "Untitled workflow"),
+            published: Boolean(workflow.enabled),
+            createdAt: String(workflow.createdAt ?? new Date().toISOString()),
+            updatedAt: String(workflow.updatedAt ?? new Date().toISOString()),
+            nodes: workflowNodes.map((node, nodeIndex) => ({
+              id: String(node.id ?? `${workflow.id ?? "workflow"}-${nodeIndex}`),
+              type: (node.kind === "trigger" || node.kind === "logic" || node.kind === "action") ? node.kind as WorkflowNode["type"] : "action",
+              name: String(node.name ?? "Node"),
+              description: String(node.description ?? `${String(node.kind ?? "action")} node`),
+              icon: String(node.icon ?? "zap"),
+              x: 240 + (nodeIndex % 4) * 260,
+              y: 180 + Math.floor(nodeIndex / 4) * 180,
+              config: node.config && typeof node.config === "object" ? Object.fromEntries(Object.entries(node.config).map(([key, value]) => [key, String(value)])) : undefined,
+            })),
+          };
+        }));
+      }
+    };
+
+    void import("pusher-js").then(({ default: PusherClient }) => {
+      if (cancelled) return;
+      client = new PusherClient(key, { cluster }) as unknown as RealtimeClient;
+      const subscribed = (client as RealtimeClient).subscribe(`netmoni-org-${organizationId}`);
+      channel = subscribed;
+      subscribed.bind("probe.completed", () => { void refreshRealtimeData(); });
+      subscribed.bind("notification.created", () => { void refreshRealtimeData(); });
+      subscribed.bind("device.updated", () => { void refreshRealtimeData(); });
+      subscribed.bind("workflow.updated", () => { void refreshRealtimeData(); });
+      subscribed.bind("workflow.deleted", () => { void refreshRealtimeData(); });
+      subscribed.bind("settings.updated", () => { void refreshRealtimeData(); });
+      subscribed.bind("workflow.executed", (data) => {
+        const executions = Array.isArray(data.executions) ? data.executions as Array<Record<string, unknown>> : [];
+        if (executions.length) {
+          const time = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+          setExecutionHistory((current) => executions.map((execution, index) => ({
+            id: `${String(execution.workflowId ?? "workflow")}-${Date.now()}-${index}`,
+            time,
+            status: execution.status === "succeeded" ? "Success" : execution.status === "failed" ? "Failed" : "Running",
+            detail: `${String(execution.workflowId ?? "Workflow")} · realtime automation execution`,
+          })).concat(current).slice(0, 12));
+        }
+        void refreshRealtimeData();
+      });
+    }).catch((error: unknown) => {
+      console.warn("Realtime Pusher connection unavailable", error);
+    });
+
+    const fallbackPoll = window.setInterval(() => { void refreshRealtimeData(); }, 30_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(fallbackPoll);
+      channel?.unsubscribe();
+      client?.disconnect();
+    };
+  }, [authState, organizationId]);
 
   useEffect(() => {
     document.documentElement.dataset.networkTheme = theme;
@@ -586,6 +709,7 @@ export default function NetworkAutomationEditor() {
       const data = await response.json() as { devices?: Array<Record<string, unknown>> };
       if (!data.devices || !Array.isArray(data.devices)) return;
       setDevices(data.devices.map((device) => ({
+        id: String(device.id ?? ""),
         name: String(device.name ?? ""),
         ip: String(device.ip ?? ""),
         subnet: String(device.subnet ?? ""),
@@ -631,6 +755,26 @@ export default function NetworkAutomationEditor() {
         if (response.ok) await refreshDevices();
       })
       .catch(() => undefined);
+  };
+
+  const renameDevice = async (device: DeviceEntry, name: string) => {
+    const trimmed = name.trim();
+    if (!trimmed || trimmed === device.name) return;
+    try {
+      const response = await fetch("/api/monitoring/devices", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id: device.id, ip: device.ip, name: trimmed }),
+      });
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({})) as { error?: string };
+        throw new Error(data.error ?? "Device could not be renamed");
+      }
+      await refreshDevices();
+      showNotice(`Device renamed to ${trimmed}.`);
+    } catch (error) {
+      showNotice(error instanceof Error ? error.message : "Device could not be renamed.");
+    }
   };
 
   const testDevice = (device: DeviceEntry) => {
@@ -1191,6 +1335,7 @@ export default function NetworkAutomationEditor() {
           onFormChange={(patch) => setDeviceForm((current) => ({ ...current, ...patch }))}
           onSubmit={addDevice}
           onRemove={removeDevice}
+          onRename={renameDevice}
           onTest={testDevice}
           testState={deviceTestState}
         />
@@ -1198,6 +1343,8 @@ export default function NetworkAutomationEditor() {
     }
 
     if (activeSection === "Alerts") return <AlertsPanel devices={devices} alerts={backendAlerts} />;
+
+    if (activeSection === "Reports") return <ReportsPanel results={backendResults} alerts={backendAlerts} history={executionHistory} />;
 
     if (activeSection === "Executions") return <ExecutionsPanel results={backendResults} history={executionHistory} />;
 

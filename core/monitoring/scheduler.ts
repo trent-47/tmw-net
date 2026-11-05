@@ -27,12 +27,15 @@ class MonitorScheduler {
       }
       for (const row of rows) {
         const organizationId = row.organizationId;
+        const { tenantMonitorStore } = await import("@/core/monitoring/store");
+        const settings = await tenantMonitorStore.getSettings(organizationId);
         const now = Date.now();
         const lastRun = this.lastRunAt.get(organizationId);
-        if (lastRun !== undefined && now - lastRun < 5_000) continue;
+        const intervalMs = Math.max(5, settings.intervalSeconds) * 1000;
+        if (lastRun !== undefined && now - lastRun < intervalMs) continue;
         this.lastRunAt.set(organizationId, now);
         const outcomes = await networkMonitor.runCycle(organizationId, "ping", { notify: false });
-        console.info(`[monitor] ping cycle org=${organizationId} devices=${outcomes.length} interval=5s`);
+        console.info(`[monitor] ping cycle org=${organizationId} devices=${outcomes.length} interval=${settings.intervalSeconds}s`);
         for (const outcome of outcomes) {
           const latency = outcome.latencyMs === null ? "n/a" : `${outcome.latencyMs}ms`;
           const detail = outcome.ok ? "reply received" : outcome.alert?.summary ?? "no reply";
@@ -46,6 +49,7 @@ class MonitorScheduler {
               deviceId: outcome.deviceId,
               deviceName: outcome.deviceName,
               ipAddress: outcome.ip,
+              alertId: outcome.alert?.id ?? "",
               status: outcome.status,
               severity: outcome.status === "Offline" ? "critical" : "warning",
               probe: outcome.probe,
@@ -62,8 +66,8 @@ class MonitorScheduler {
 
   start() {
     if (this.timer || process.env.NETMONI_SCHEDULER === "off") return;
-    const intervalMs = 5_000;
-    console.info(`[monitor] scheduler started; checking due organizations every ${intervalMs}ms`);
+    const intervalMs = 1_000;
+    console.info(`[monitor] scheduler started; evaluating organizations every ${intervalMs}ms and using each configured polling interval`);
     void this.tick();
     this.timer = setInterval(() => { void this.tick(); }, intervalMs);
     if (typeof this.timer.unref === "function") this.timer.unref();

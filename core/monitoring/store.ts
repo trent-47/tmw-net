@@ -64,6 +64,8 @@ function toAlert(row: typeof monitoringAlerts.$inferSelect): NetworkAlert {
     recommendation: row.recommendation,
     evidence,
     emailStatus: row.emailStatus,
+    acknowledgedAt: row.acknowledgedAt?.toISOString() ?? null,
+    lastNotifiedAt: row.lastNotifiedAt?.toISOString() ?? null,
     createdAt: row.createdAt.toISOString(),
   };
 }
@@ -73,7 +75,7 @@ function toSettings(organizationId: string, row: MonitoringSettingsRow | undefin
   const selectedAiCredential = aiCredentials.find((credential) => credential.provider === provider);
   return {
     organizationId,
-    intervalSeconds: Math.max(60, row?.intervalSeconds ?? 60),
+    intervalSeconds: Math.max(5, row?.intervalSeconds ?? 5),
     failureThreshold: row?.failureThreshold ?? 3,
     latencyWarningMs: row?.latencyWarningMs ?? 500,
     packetLossWarningPercent: row?.packetLossWarning ?? 10,
@@ -131,6 +133,15 @@ class TenantMonitorStore {
       status: device.status,
     });
     return device;
+  }
+
+  async updateDeviceName(organizationId: string, deviceId: string, name: string): Promise<NetworkDevice | undefined> {
+    const updated = await db()
+      .update(networkDevices)
+      .set({ name })
+      .where(and(eq(networkDevices.organizationId, organizationId), eq(networkDevices.id, deviceId)))
+      .returning();
+    return updated[0] ? toDevice(updated[0]) : undefined;
   }
 
   async deleteDevice(organizationId: string, deviceId: string): Promise<boolean> {
@@ -196,8 +207,42 @@ class TenantMonitorStore {
   async updateAlertEmailStatus(organizationId: string, alertId: string, emailStatus: string): Promise<void> {
     await db()
       .update(monitoringAlerts)
-      .set({ emailStatus })
+      .set({
+        emailStatus,
+        ...(emailStatus === "sent" ? { lastNotifiedAt: new Date() } : {}),
+      })
       .where(and(eq(monitoringAlerts.organizationId, organizationId), eq(monitoringAlerts.id, alertId)));
+  }
+
+  async acknowledgeAlert(organizationId: string, alertId: string): Promise<NetworkAlert | null> {
+    const [updated] = await db()
+      .update(monitoringAlerts)
+      .set({ acknowledgedAt: new Date(), emailStatus: "acknowledged" })
+      .where(and(eq(monitoringAlerts.organizationId, organizationId), eq(monitoringAlerts.id, alertId)))
+      .returning();
+    return updated ? toAlert(updated) : null;
+  }
+
+  async getAlert(organizationId: string, alertId: string): Promise<NetworkAlert | null> {
+    const [row] = await db()
+      .select()
+      .from(monitoringAlerts)
+      .where(and(eq(monitoringAlerts.organizationId, organizationId), eq(monitoringAlerts.id, alertId)))
+      .limit(1);
+    return row ? toAlert(row) : null;
+  }
+
+  async getActiveAlertForDevice(organizationId: string, deviceId: string): Promise<NetworkAlert | null> {
+    const rows = await db()
+      .select()
+      .from(monitoringAlerts)
+      .where(and(eq(monitoringAlerts.organizationId, organizationId), eq(monitoringAlerts.deviceId, deviceId)))
+      .orderBy(desc(monitoringAlerts.createdAt))
+      .limit(100);
+    const active = rows
+      .map(toAlert)
+      .find((alert) => alert.status !== "Online" && !alert.acknowledgedAt);
+    return active ?? null;
   }
 
   async listAlerts(organizationId: string, options: { limit?: number } = {}): Promise<NetworkAlert[]> {
@@ -218,7 +263,18 @@ class TenantMonitorStore {
       db().select().from(aiProviderCredentials).where(eq(aiProviderCredentials.organizationId, organizationId)),
       db().select().from(organizationSmtpSettings).where(eq(organizationSmtpSettings.organizationId, organizationId)).limit(1),
     ]);
-    return toSettings(organizationId, row, aiRows, smtpRows[0]);
+    const settings = toSettings(organizationId, row, aiRows, smtpRows[0]);
+    if (!smtpRows[0]?.passwordEncrypted) {
+      settings.smtpPasswordConfigured = false;
+    } else {
+      try {
+        decryptCredential(smtpRows[0].passwordEncrypted);
+        settings.smtpPasswordConfigured = true;
+      } catch {
+        settings.smtpPasswordConfigured = false;
+      }
+    }
+    return settings;
   }
 
   async getAiApiKey(organizationId: string, provider?: string): Promise<string | undefined> {
@@ -244,14 +300,19 @@ class TenantMonitorStore {
     const rows = await db().select().from(organizationSmtpSettings).where(eq(organizationSmtpSettings.organizationId, organizationId)).limit(1);
     const smtp = rows[0];
     if (!smtp?.username || !smtp.passwordEncrypted) return null;
-    return {
-      host: smtp.host,
-      port: smtp.port,
-      secure: smtp.secure,
-      user: smtp.username,
-      password: decryptCredential(smtp.passwordEncrypted),
-      from: smtp.fromAddress || smtp.username,
-    };
+    try {
+      return {
+        host: smtp.host,
+        port: smtp.port,
+        secure: smtp.secure,
+        user: smtp.username,
+        password: decryptCredential(smtp.passwordEncrypted),
+        from: smtp.fromAddress || smtp.username,
+      };
+    } catch {
+      console.error(`[smtp] encrypted credentials could not be decrypted for organization=${organizationId}; re-save the SMTP password in Settings`);
+      return null;
+    }
   }
 
   async saveSmtpSettings(organizationId: string, input: Partial<MonitoringSettings>, password?: string, removePassword = false): Promise<void> {
@@ -287,7 +348,7 @@ class TenantMonitorStore {
   async saveSettings(organizationId: string, input: Partial<MonitoringSettings>): Promise<MonitoringSettings> {
     const current = await this.getSettings(organizationId);
     const next: MonitoringSettings = { ...current, ...input, organizationId, updatedAt: new Date().toISOString() };
-    next.intervalSeconds = Math.max(60, Math.floor(Number(next.intervalSeconds) || 60));
+    next.intervalSeconds = Math.max(5, Math.floor(Number(next.intervalSeconds) || 30));
     await db()
       .insert(monitoringSettings)
       .values({

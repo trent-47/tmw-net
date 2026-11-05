@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { sessionWorkspace } from "@/auth/store";
-import { renderTemplate, sendFaultEmail, smtpConfigFromEnv } from "@/core/monitoring/mailer";
+import { buildNotificationHtml, renderTemplate, sendFaultEmail, smtpConfigFromEnv } from "@/core/monitoring/mailer";
 import { tenantMonitorStore } from "@/core/monitoring/store";
 
 export const dynamic = "force-dynamic";
@@ -32,7 +32,16 @@ export async function POST(request: Request) {
     const values = { ...(body.values ?? {}) };
     const subject = renderTemplate(body.subject?.trim() || "[Network Alert] {{deviceName}} is {{status}}", values);
     const text = body.message?.trim() || "Network fault detected. Please investigate the affected node.";
-    const sent = await sendFaultEmail(smtp, { to, subject, text });
+    const html = buildNotificationHtml({
+      title: subject,
+      message: text,
+      status: typeof values.status === "string" ? values.status : "SMTP Verification",
+      severity: typeof values.severity === "string" ? values.severity : "info",
+      deviceName: typeof values.deviceName === "string" ? values.deviceName : "NetMoni SMTP Test",
+      ipAddress: typeof values.ipAddress === "string" ? values.ipAddress : undefined,
+      footer: "This verification message confirms that SMTP delivery and HTML rendering are working.",
+    });
+    const sent = await sendFaultEmail(smtp, { to, subject, text, html });
     if (body.alertId) await tenantMonitorStore.updateAlertEmailStatus(organizationId, body.alertId, "sent");
     return NextResponse.json({ sent: true, messageId: sent.messageId, accepted: sent.accepted });
   } catch (error) {

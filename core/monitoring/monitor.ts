@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { runProbe } from "@/core/monitoring/probes";
 import { synthesizeFaultMessage } from "@/core/monitoring/ai";
-import { renderTemplate, sendFaultEmail, smtpConfigFromEnv } from "@/core/monitoring/mailer";
+import { buildNotificationHtml, renderTemplate, sendFaultEmail, smtpConfigFromEnv } from "@/core/monitoring/mailer";
 import { tenantMonitorStore } from "@/core/monitoring/store";
 import { alertSeverity, type CheckRow, type NetworkAlert, type NetworkDevice } from "@/core/monitoring/types";
+import { triggerRealtime } from "@/core/realtime";
+import { getAcknowledgeUrl } from "@/core/alert-ack";
 
 export type AlertPayload = {
   device: Pick<NetworkDevice, "id" | "name" | "ip" | "type" | "subnet" | "mac">;
@@ -139,10 +141,22 @@ class NetworkMonitor {
         const recipient = settings.adminEmail || process.env.ADMIN_EMAIL;
         if (smtp && recipient) {
           try {
+            const acknowledgeUrl = getAcknowledgeUrl(organizationId, alert.id);
+            const text = `${message.body}\n\nAcknowledge this alert: ${acknowledgeUrl}`;
             const sent = await sendFaultEmail(smtp, {
               to: recipient,
               subject: message.subject || renderTemplate("[Network Alert] {{deviceName}} is {{status}}", { deviceName: device.name, status }),
-              text: message.body,
+              text,
+              html: buildNotificationHtml({
+                title: message.subject || `${device.name} requires attention`,
+                message: message.body,
+                status,
+                severity: payload.severity,
+                deviceName: device.name,
+                ipAddress: device.ip,
+                acknowledgeUrl,
+                footer: "Repeat email notifications stop when an administrator accepts this alert.",
+              }),
             });
             email = { to: recipient, status: "sent", detail: sent.messageId };
             await tenantMonitorStore.updateAlertEmailStatus(organizationId, alert.id, "sent");
@@ -189,6 +203,15 @@ class NetworkMonitor {
             to: recipient,
             subject: message.subject || `[Network Recovered] ${device.name} is Online`,
             text: message.body,
+            html: buildNotificationHtml({
+              title: message.subject || `${device.name} has recovered`,
+              message: message.body,
+              status: "Online",
+              severity: "info",
+              deviceName: device.name,
+              ipAddress: device.ip,
+              footer: "This recovery notification was sent automatically by NetMoni.",
+            }),
           });
           email = { to: recipient, status: "sent", detail: sent.messageId };
           await tenantMonitorStore.updateAlertEmailStatus(organizationId, alert.id, "sent");
@@ -201,13 +224,20 @@ class NetworkMonitor {
       }
     }
 
+    if (!alert && status !== "Online") {
+      alert = await tenantMonitorStore.getActiveAlertForDevice(organizationId, device.id);
+    }
+
     const command = kind === "ping"
       ? `${process.platform === "win32" ? "ping" : "ping"} ${process.platform === "win32" ? "-n 1 -w 2000" : "-c 1 -W 2"} ${device.ip}`
       : kind === "tcp"
         ? `TCP probe ${device.ip}:${options.port ?? 80}`
         : `SNMP probe ${device.ip}`;
     const output = probe.error ?? check.detail ?? `${probe.ok ? "Response received" : "No response"}; latency=${probe.latencyMs ?? "n/a"} ms; packet loss=${probe.packetLossPercent}%`;
-    return { deviceId: device.id, deviceName: device.name, ip: device.ip, probe: kind, ok: probe.ok, latencyMs: probe.latencyMs, packetLossPercent: probe.packetLossPercent, bandwidthInMbps: bandwidthIn, bandwidthOutMbps: bandwidthOut, status, alert, message, email, command, output };
+    const outcome = { deviceId: device.id, deviceName: device.name, ip: device.ip, probe: kind, ok: probe.ok, latencyMs: probe.latencyMs, packetLossPercent: probe.packetLossPercent, bandwidthInMbps: bandwidthIn, bandwidthOutMbps: bandwidthOut, status, alert, message, email, command, output };
+    await triggerRealtime(organizationId, "probe.completed", outcome);
+    if (alert) await triggerRealtime(organizationId, "notification.created", { alert, outcome });
+    return outcome;
   }
 
   async testDevice(organizationId: string, device: NetworkDevice, kind: CheckRow["probe"], options: { port?: number; community?: string } = {}): Promise<MonitorOutcome> {

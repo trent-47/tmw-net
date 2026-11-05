@@ -1,7 +1,7 @@
 "use client";
 
 import type { ReactNode } from "react";
-import { Activity, ArrowRight, Bell, CircleHelp, Globe2, Network, Play, Plus, Settings, Workflow, Zap } from "lucide-react";
+import { Activity, ArrowRight, Bell, CircleHelp, FileText, Globe2, Network, Play, Plus, Settings, Workflow, Zap } from "lucide-react";
 import type { EditorSection } from "./types";
 
 type Props = {
@@ -33,6 +33,7 @@ const railIcons: Record<EditorSection, ReactNode> = {
   Executions: <Zap size={18} />,
   Devices: <Network size={18} />,
   Alerts: <Bell size={18} />,
+  Reports: <FileText size={18} />,
   Settings: <Settings size={18} />,
 };
 
@@ -62,7 +63,7 @@ export function DashboardFrame({
   onExecute,
   children,
 }: Props) {
-  const sections: EditorSection[] = ["Overview", "Workflows", "Executions", "Devices", "Alerts", "Settings"];
+  const sections: EditorSection[] = ["Overview", "Workflows", "Executions", "Devices", "Alerts", "Reports", "Settings"];
   return (
     <div className={`app-shell network-theme-${theme}`}>
       {notice && <div className="ui-notice" role="status">{notice}</div>}
@@ -113,7 +114,7 @@ export function DashboardFrame({
         </header>
 
         <div className="editor-tabs">
-          {(["Workflows", "Executions", "Devices", "Alerts"] as EditorSection[]).map((tab) => (
+          {(["Workflows", "Executions", "Devices", "Alerts", "Reports"] as EditorSection[]).map((tab) => (
             <button key={tab} className={`editor-tab ${activeSection === tab ? "active" : ""}`} onClick={() => onSelectSection(tab)}>
               {tab === "Workflows" ? "Workflows" : tab}
             </button>

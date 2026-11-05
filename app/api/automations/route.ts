@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { createWorkflow } from "@/core/workflows/definition";
 import { workflowRepository } from "@/core/runtime";
 import { sessionWorkspace } from "@/auth/store";
+import { triggerRealtime } from "@/core/realtime";
 
 export const dynamic = "force-dynamic";
 
@@ -15,6 +16,7 @@ export async function POST(request: Request) {
     const body = await request.json();
     const organizationId = await sessionWorkspace(request);
     const workflow = await workflowRepository.save(createWorkflow(body), organizationId);
+    await triggerRealtime(organizationId, "workflow.updated", { workflow });
     return NextResponse.json({ workflow }, { status: 201 });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "Invalid workflow" }, { status: 400 });
@@ -29,6 +31,7 @@ export async function DELETE(request: Request) {
     const organizationId = await sessionWorkspace(request);
     const deleted = await workflowRepository.delete(workflowId, organizationId);
     if (!deleted) return NextResponse.json({ error: "Workflow not found" }, { status: 404 });
+    await triggerRealtime(organizationId, "workflow.deleted", { workflowId });
     return NextResponse.json({ deleted: true });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "Could not delete workflow" }, { status: 400 });

@@ -65,6 +65,8 @@ export type NetworkAlert = {
   recommendation: string;
   evidence: Record<string, unknown>;
   emailStatus: string;
+  acknowledgedAt?: string | null;
+  lastNotifiedAt?: string | null;
   createdAt: string;
 };
 

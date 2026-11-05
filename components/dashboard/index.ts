@@ -9,6 +9,7 @@ export { NodeInspector } from "./NodeInspector";
 export type { AiController, SmtpController } from "./NodeInspector";
 export { DevicesPanel } from "./DevicesPanel";
 export { AlertsPanel } from "./AlertsPanel";
+export { ReportsPanel } from "./ReportsPanel";
 export { ExecutionsPanel } from "./ExecutionsPanel";
 export { SettingsPanel } from "./SettingsPanel";
 export { OverviewPanel } from "./OverviewPanel";
