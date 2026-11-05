@@ -1,12 +1,12 @@
 "use client";
 
 import { useEffect, useRef, useState, useSyncExternalStore, type FormEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { useRouter } from "next/navigation";
 import {
   AlertsPanel,
   DashboardFrame,
   DashboardStyles,
   DevicesPanel,
-  EntryScreen,
   ExecutionsPanel,
   NodeInspector,
   OverviewPanel,
@@ -31,8 +31,6 @@ import type {
   DeviceEntry,
   DeviceForm,
   EditorSection,
-  EntryField,
-  EntryStage,
   ExecutionRun,
   NodeLibraryItem,
   SavedWorkflow,
@@ -51,19 +49,12 @@ function aiProviderLabel(provider: string): string {
 }
 
 export default function NetworkAutomationEditor() {
-  /* ---------------- entry flow state ---------------- */
-  const [entryStage, setEntryStage] = useState<EntryStage>("login");
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [organizationName, setOrganizationName] = useState("");
-  const [ownerName, setOwnerName] = useState("");
-  const [ownerEmail, setOwnerEmail] = useState("");
-  const [ownerPassword, setOwnerPassword] = useState("");
-  const [confirmOwnerPassword, setConfirmOwnerPassword] = useState("");
+  const router = useRouter();
+  const [authState, setAuthState] = useState<"checking" | "authenticated" | "error">("checking");
+  const [authError, setAuthError] = useState("");
   const [organizationId, setOrganizationId] = useState("");
   const [currentUser, setCurrentUser] = useState({ name: "", email: "" });
-  const [entryError, setEntryError] = useState("");
-  const [entryBusy, setEntryBusy] = useState(false);
+  const [organizationName, setOrganizationName] = useState("");
 
   /* ---------------- network automation workspace ---------------- */
   const [nodes, setNodes] = useState<WorkflowNode[]>(initialNodes);
@@ -170,7 +161,36 @@ export default function NetworkAutomationEditor() {
   const toggleTheme = () => setThemePreference(theme === "dark" ? "light" : "dark");
 
   useEffect(() => {
-    if (entryStage !== "editor") return;
+    let cancelled = false;
+    void fetch("/api/auth/me", { cache: "no-store" })
+      .then(async (response) => {
+        if (response.status === 401) {
+          router.replace("/login");
+          return;
+        }
+        const data = await response.json() as {
+          authenticated?: boolean;
+          user?: { name: string; email: string };
+          organization?: { id: string; name: string };
+          session?: { workspaceId: string };
+        };
+        if (!response.ok || !data.authenticated || !data.user) throw new Error("Could not restore your session.");
+        if (cancelled) return;
+        setCurrentUser(data.user);
+        setOrganizationId(data.organization?.id ?? data.session?.workspaceId ?? "local-workspace");
+        setOrganizationName(data.organization?.name ?? "");
+        setAuthState("authenticated");
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        setAuthError(error instanceof Error ? error.message : "Could not restore your session.");
+        setAuthState("error");
+      });
+    return () => { cancelled = true; };
+  }, [router]);
+
+  useEffect(() => {
+    if (authState !== "authenticated") return;
     let cancelled = false;
     const loadWorkspace = async () => {
       try {
@@ -302,7 +322,7 @@ export default function NetworkAutomationEditor() {
       cancelled = true;
       window.clearInterval(poll);
     };
-  }, [entryStage]);
+  }, [authState]);
 
   useEffect(() => {
     document.documentElement.dataset.networkTheme = theme;
@@ -724,83 +744,6 @@ export default function NetworkAutomationEditor() {
     }
   };
 
-  /* ---------------- auth / org flows: unchanged API process ---------------- */
-  const login = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    setEntryBusy(true);
-    setEntryError("");
-    const response = await fetch("/api/auth/login", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ email, password }),
-    });
-    const data = (await response.json()) as {
-      user?: { name: string; email: string };
-      organization?: { id: string; name: string };
-      session?: { workspaceId: string };
-      error?: string;
-    };
-    if (!response.ok || !data.session) {
-      setEntryError("Enter an email and password to continue.");
-      setEntryBusy(false);
-      return;
-    }
-    setOrganizationId(data.session.workspaceId);
-    if (data.user) {
-      setCurrentUser(data.user);
-      if (data.user.email) setSmtpRecipients(data.user.email);
-    }
-    if (data.organization) setOrganizationName(data.organization.name);
-    setEntryStage("editor");
-    setEntryBusy(false);
-  };
-
-  const createOrganization = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    setEntryBusy(true);
-    setEntryError("");
-    const response = await fetch("/api/organizations", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        name: organizationName,
-        ownerName,
-        ownerEmail,
-        ownerPassword,
-        confirmPassword: confirmOwnerPassword,
-      }),
-    });
-    const data = (await response.json()) as {
-      organization?: { id: string };
-      owner?: { name: string; email: string };
-      error?: string;
-    };
-    if (!response.ok || !data.organization) {
-      setEntryError(data.error ?? "Could not create organization.");
-      setEntryBusy(false);
-      return;
-    }
-    setOrganizationId(data.organization.id);
-    if (data.owner) {
-      setCurrentUser(data.owner);
-      if (data.owner.email) setSmtpRecipients(data.owner.email);
-    }
-    setEntryStage("editor");
-    setEntryBusy(false);
-  };
-
-  const setEntryField = (field: EntryField, value: string) => {
-    switch (field) {
-      case "email": setEmail(value); break;
-      case "password": setPassword(value); break;
-      case "organizationName": setOrganizationName(value); break;
-      case "ownerName": setOwnerName(value); break;
-      case "ownerEmail": setOwnerEmail(value); break;
-      case "ownerPassword": setOwnerPassword(value); break;
-      case "confirmOwnerPassword": setConfirmOwnerPassword(value); break;
-    }
-  };
-
   /* ---------------- workflow library persistence (database-backed) ---------------- */
   const persistWorkflowLibrary = (next: SavedWorkflow[]) => setWorkflowLibrary(next);
 
@@ -1158,28 +1101,16 @@ export default function NetworkAutomationEditor() {
     return <OverviewPanel onOpenWorkflows={() => setActiveSection("Workflows")} />;
   };
 
-  /* ---------------- entry screens ---------------- */
-  if (entryStage !== "editor") {
+  if (authState !== "authenticated") {
     return (
-      <EntryScreen
-        stage={entryStage}
-        fields={{
-          email,
-          password,
-          organizationName,
-          ownerName,
-          ownerEmail,
-          ownerPassword,
-          confirmOwnerPassword,
-        }}
-        onField={setEntryField}
-        error={entryError}
-        busy={entryBusy}
-        onLogin={login}
-        onCreateOrganization={createOrganization}
-        onStartOrganization={() => { setEntryStage("organization"); setEntryError(""); }}
-        onBackToLogin={() => setEntryStage("login")}
-      />
+      <main className="entry-shell" aria-busy={authState === "checking"}>
+        {authState === "checking" ? <p>Restoring your session...</p> : <div className="entry-card">
+          <h2>Session unavailable</h2>
+          <p className="entry-lede">{authError}</p>
+          <button className="entry-submit" type="button" onClick={() => window.location.reload()}>Try again</button>
+          <a className="back-link" href="/login">Go to sign in</a>
+        </div>}
+      </main>
     );
   }
 
