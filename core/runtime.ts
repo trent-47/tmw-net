@@ -22,7 +22,7 @@ automationEngine.registerCapability({ name: "monitor_device", description: "Run 
   const organizationId = String(input.organizationId ?? event.source ?? "local-workspace");
   const device = await tenantMonitorStore.listDevices(organizationId).then((devices) => devices.find((entry) => entry.id === input.deviceId || entry.ip === input.ipAddress));
   if (!device) return { ...input, fault: false, reason: "Device not registered" };
-  const outcome = await networkMonitor.processCheck(organizationId, device, (input.probe as "ping" | "tcp" | "snmp") ?? "ping", { notify: true });
+  const outcome = await networkMonitor.processCheck(organizationId, device, (input.probe as "ping" | "tcp" | "snmp") ?? "ping", { notify: false });
   return { ...input, fault: !outcome.ok || outcome.status !== "Online", outcome };
 });
 

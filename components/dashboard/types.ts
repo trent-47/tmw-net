@@ -31,6 +31,14 @@ export type NodeLibraryItem = { type: NodeType; name: string; description: strin
 export type DeviceEntry = { name: string; ip: string; subnet: string; mac: string; type: string; status: string };
 
 export type DeviceForm = { name: string; ip: string; subnet: string; mac: string; type: string };
+export type DeviceTestState = {
+  deviceName: string;
+  ip: string;
+  status: "running" | "success" | "fault" | "error";
+  progress: number;
+  command: string;
+  lines: string[];
+};
 
 export type BackendAlert = {
   id: string;

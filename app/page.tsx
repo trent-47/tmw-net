@@ -30,6 +30,7 @@ import type {
   BackendResult,
   DeviceEntry,
   DeviceForm,
+  DeviceTestState,
   EditorSection,
   ExecutionRun,
   NodeLibraryItem,
@@ -61,6 +62,8 @@ export default function NetworkAutomationEditor() {
   const [selectedNode, setSelectedNode] = useState("");
   const [viewport, setViewport] = useState<Viewport>(DEFAULT_VIEWPORT);
   const [running, setRunning] = useState(false);
+  const [runningNodeId, setRunningNodeId] = useState("");
+  const [completedTestNodeIds, setCompletedTestNodeIds] = useState<string[]>([]);
   const [published, setPublished] = useState(false);
   const [search, setSearch] = useState("");
   const [leftOpen, setLeftOpen] = useState(true);
@@ -105,6 +108,7 @@ export default function NetworkAutomationEditor() {
   const [smtpRecipients, setSmtpRecipients] = useState("");
   const [smtpState, setSmtpState] = useState("");
   const [devices, setDevices] = useState<DeviceEntry[]>(initialDevices);
+  const [deviceTestState, setDeviceTestState] = useState<DeviceTestState | null>(null);
   const [deviceFormOpen, setDeviceFormOpen] = useState(false);
   const [deviceForm, setDeviceForm] = useState<DeviceForm>({
     name: "",
@@ -113,7 +117,7 @@ export default function NetworkAutomationEditor() {
     mac: "",
     type: "router",
   });
-  const [aiProvider, setAiProvider] = useState("Gemini");
+  const [aiProvider, setAiProvider] = useState("Groq");
   const [aiInstruction, setAiInstruction] = useState(
     "Write a concise, professional network fault notification. Include the affected device, IP, severity, evidence and recommended action."
   );
@@ -317,7 +321,7 @@ export default function NetworkAutomationEditor() {
     };
     void loadWorkspace();
 
-    const poll = window.setInterval(loadWorkspace, 30_000);
+    const poll = window.setInterval(loadWorkspace, 5_000);
     return () => {
       cancelled = true;
       window.clearInterval(poll);
@@ -502,21 +506,61 @@ export default function NetworkAutomationEditor() {
 
   const executeWorkflow = async () => {
     setRunning(true);
+    setCompletedTestNodeIds([]);
     const executionId = crypto.randomUUID();
     const startedAt = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    if (!saveCurrentWorkflow()) {
+      setRunning(false);
+      return;
+    }
+    const capabilityByName: Record<string, string> = {
+      "Network Fault": "monitor_device",
+      "Status Changed": "monitor_device",
+      "Schedule Monitor": "monitor_device",
+      "AI Message": "ai_fault_message",
+      "Send Gmail": "send_admin_email",
+      "Create Alert": "create_record",
+      "HTTP Request": "send_http_request",
+      "Record Incident": "log_event",
+    };
     setExecutionHistory((cur) => [
       { id: executionId, time: startedAt, status: "Running", detail: `${nodes.length} nodes · ${workflowName}` },
       ...cur,
     ].slice(0, 12));
     try {
-      const response = await fetch("/api/events", {
+      const workflowPayload = {
+        id: activeWorkflowId ?? crypto.randomUUID(),
+        name: workflowName.trim(),
+        description: `${nodes.length} node workflow`,
+        trigger: { event: "workflow.test" },
+        enabled: true,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        nodes: nodes.map((node) => ({
+          id: node.id,
+          kind: node.type,
+          name: node.name,
+          capability: node.type === "action"
+            ? (node.config?.ipAddress ? "monitor_device" : capabilityByName[node.name])
+            : undefined,
+          config: node.config,
+        })),
+      };
+      const responsePromise = fetch("/api/events", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           type: "workflow.execute",
-          payload: { workflowId: activeWorkflowId ?? "unsaved-workflow", organizationId, probe: "ping" },
+          payload: { workflowId: activeWorkflowId ?? workflowPayload.id, organizationId, probe: "ping", workflow: workflowPayload },
         }),
       });
+      for (const node of nodes) {
+        setRunningNodeId(node.id);
+        await new Promise((resolve) => window.setTimeout(resolve, 420));
+        setCompletedTestNodeIds((current) => [...current, node.id]);
+      }
+      setRunningNodeId("");
+      const response = await responsePromise;
       const data = await response.json() as { executions?: Array<{ output?: { outcomes?: Array<{ deviceName?: string; status?: string; ok?: boolean; latencyMs?: number | null; packetLossPercent?: number }> } }>; error?: string };
       if (!response.ok) throw new Error(data.error ?? "Execution endpoint returned an error");
       const outcomes = data.executions?.[0]?.output?.outcomes ?? [];
@@ -590,19 +634,81 @@ export default function NetworkAutomationEditor() {
   };
 
   const testDevice = (device: DeviceEntry) => {
+    setDeviceTestState({
+      deviceName: device.name,
+      ip: device.ip,
+      status: "running",
+      progress: 12,
+      command: "Preparing ping probe...",
+      lines: ["Resolving target...", "Opening monitor probe channel..."],
+    });
     showNotice(`Testing ${device.name} (${device.ip})...`);
+
+    window.setTimeout(() => setDeviceTestState((current) => current?.ip === device.ip ? {
+      ...current,
+      progress: 38,
+      command: "",
+      lines: [...current.lines, "Target accepted.", "Executing reachability probe..."],
+    } : current), 120);
+
     void fetch("/api/monitoring/results", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ ip: device.ip, probe: "ping" }),
     }).then(async (response) => {
-      const data = await response.json().catch(() => ({})) as { outcome?: { status?: string; latencyMs?: number | null; packetLossPercent?: number }; error?: string };
+      const data = await response.json().catch(() => ({})) as {
+        outcome?: { status?: string; latencyMs?: number | null; packetLossPercent?: number; command?: string; output?: string; ok?: boolean };
+        error?: string;
+      };
       if (!response.ok || data.error) throw new Error(data.error ?? "Device test failed");
       const outcome = data.outcome;
-      await refreshDevices();
+      const command = outcome?.command || `ping ${device.ip}`;
+      const reachable = outcome?.ok ?? outcome?.status === "Online";
+      await Promise.all([
+        refreshDevices(),
+        fetch("/api/monitoring/results?limit=50").then(async (resultsResponse) => {
+          if (!resultsResponse.ok) return;
+          const resultsData = await resultsResponse.json() as { results?: Array<Record<string, unknown>> };
+          setBackendResults((resultsData.results ?? []).map((result) => ({
+            id: String(result.id ?? ""),
+            deviceName: String(result.deviceName ?? ""),
+            ipAddress: String(result.ipAddress ?? ""),
+            probe: String(result.probe ?? "ping"),
+            ok: Boolean(result.ok),
+            latencyMs: result.latencyMs === null || result.latencyMs === undefined ? null : Number(result.latencyMs),
+            packetLossPercent: Number(result.packetLossPercent ?? 0),
+            bandwidthInMbps: result.bandwidthInMbps === null || result.bandwidthInMbps === undefined ? null : Number(result.bandwidthInMbps),
+            bandwidthOutMbps: result.bandwidthOutMbps === null || result.bandwidthOutMbps === undefined ? null : Number(result.bandwidthOutMbps),
+            checkedAt: String(result.checkedAt ?? ""),
+          })));
+        }),
+      ]);
       setDevices((cur) => cur.map((entry) => entry.ip === device.ip ? { ...entry, status: outcome?.status ?? entry.status } : entry));
+      setDeviceTestState({
+        deviceName: device.name,
+        ip: device.ip,
+        status: reachable ? "success" : "fault",
+        progress: 100,
+        command,
+        lines: [
+          `${reachable ? "ok:" : "error:"} ${outcome?.output ?? (reachable ? "Host responded" : "Host did not respond")}`,
+          `reply: ${outcome?.latencyMs ?? "n/a"} ms | packet loss: ${outcome?.packetLossPercent ?? 0}%`,
+          reachable ? "ok: Probe completed successfully." : "error: Fault detected; administrator notification workflow was evaluated.",
+        ],
+      });
       showNotice(`${device.name}: ${outcome?.status ?? "unknown"} · ${outcome?.latencyMs ?? "–"} ms · ${outcome?.packetLossPercent ?? 0}% loss`);
-    }).catch(() => showNotice("Device test API unreachable."));
+    }).catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : "Device test API unreachable.";
+      setDeviceTestState({
+        deviceName: device.name,
+        ip: device.ip,
+        status: "error",
+        progress: 100,
+        command: `ping ${device.ip}`,
+        lines: [`error: ${message}`],
+      });
+      showNotice(message);
+    });
   };
 
   const saveSmtp = async (event?: FormEvent<HTMLFormElement>) => {
@@ -758,7 +864,7 @@ export default function NetworkAutomationEditor() {
           id: workflow.id,
           name: workflow.name,
           description: `${workflow.nodes.length} node network automation saved from the workflow editor.`,
-          trigger: { event: triggerNode?.config?.event ?? "fault" },
+          trigger: { event: triggerNode?.config?.event ?? "monitor.run" },
           enabled: workflow.published,
           nodes: workflow.nodes.map((node) => ({
             id: node.id,
@@ -840,6 +946,32 @@ export default function NetworkAutomationEditor() {
   const saveNodeConfiguration = (nodeName: string) => {
     if (!saveCurrentWorkflow()) return;
     showNotice(`${nodeName} configuration saved.`);
+  };
+
+  const togglePublished = () => {
+    if (!workflowName.trim()) {
+      showNotice("Name your workflow before publishing.");
+      return;
+    }
+    const nextPublished = !published;
+    setPublished(nextPublished);
+    const id = activeWorkflowId ?? crypto.randomUUID();
+    if (!activeWorkflowId) setActiveWorkflowId(id);
+    const existing = workflowLibrary.find((workflow) => workflow.id === id);
+    const now = new Date().toISOString();
+    const saved: SavedWorkflow = {
+      id,
+      name: workflowName.trim(),
+      nodes,
+      published: nextPublished,
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+    };
+    const next = [saved, ...workflowLibrary.filter((workflow) => workflow.id !== id)];
+    persistWorkflowLibrary(next);
+    setSavedSnapshot(JSON.stringify({ nodes, workflowName: workflowName.trim(), published: nextPublished }));
+    void syncWorkflowToServer(saved);
+    showNotice(nextPublished ? "Workflow published." : "Workflow unpublished.");
   };
 
   const deleteWorkflow = (id: string) => {
@@ -1008,7 +1140,9 @@ export default function NetworkAutomationEditor() {
           canvasRef={canvasRef}
           nodes={nodes}
           selectedId={selectedNode}
-          running={running}
+          running={running || published}
+          runningNodeId={runningNodeId}
+          completedTestNodeIds={completedTestNodeIds}
           viewport={viewport}
           leftOpen={leftOpen}
           search={search}
@@ -1058,6 +1192,7 @@ export default function NetworkAutomationEditor() {
           onSubmit={addDevice}
           onRemove={removeDevice}
           onTest={testDevice}
+          testState={deviceTestState}
         />
       );
     }
@@ -1135,7 +1270,7 @@ export default function NetworkAutomationEditor() {
         onBackToLibrary={() => setWorkflowView("library")}
         onCreateWorkflow={createWorkflow}
         onSaveWorkflow={() => { saveCurrentWorkflow(); }}
-        onTogglePublished={() => setPublished(!published)}
+        onTogglePublished={togglePublished}
         onExecute={executeWorkflow}
       >
         {renderPage()}

@@ -69,7 +69,7 @@ function toAlert(row: typeof monitoringAlerts.$inferSelect): NetworkAlert {
 }
 
 function toSettings(organizationId: string, row: MonitoringSettingsRow | undefined, aiCredentials: AiCredentialRow[], smtp?: SmtpSettingsRow): MonitoringSettings {
-  const provider = row?.aiProvider ?? "gemini";
+  const provider = row?.aiProvider ?? "groq";
   const selectedAiCredential = aiCredentials.find((credential) => credential.provider === provider);
   return {
     organizationId,
@@ -78,9 +78,9 @@ function toSettings(organizationId: string, row: MonitoringSettingsRow | undefin
     latencyWarningMs: row?.latencyWarningMs ?? 500,
     packetLossWarningPercent: row?.packetLossWarning ?? 10,
     bandwidthWarningMbps: row?.bandwidthWarning ?? 0,
-    adminEmail: row?.adminEmail ?? "",
-    aiProvider: row?.aiProvider ?? "gemini",
-    aiModel: selectedAiCredential?.model ?? "gemini-2.5-flash",
+    adminEmail: row?.adminEmail ?? process.env.ADMIN_EMAIL ?? "",
+    aiProvider: row?.aiProvider ?? "groq",
+    aiModel: selectedAiCredential?.model ?? "llama-3.3-70b-versatile",
     aiInstruction: row?.aiInstruction ?? "Write a concise, professional network fault notification. Include the affected device, IP, severity, evidence and recommended action.",
     aiApiKeyConfigured: Boolean(selectedAiCredential?.apiKeyEncrypted),
     aiProviderConfigurations: aiCredentials.map((credential) => ({

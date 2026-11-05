@@ -102,7 +102,7 @@ async function callProvider(config: AiConfig, prompt: string): Promise<string> {
   }
   const response = await fetch(`${url}/chat/completions`, {
     method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${config.apiKey ?? ""}` },
+    headers: { "content-type": "application/json", authorization: "Bearer " + (config.apiKey ?? "") },
     body: JSON.stringify({ model, messages: [{ role: "user", content: prompt }], max_tokens: 700 }),
     signal: AbortSignal.timeout(20_000),
   });

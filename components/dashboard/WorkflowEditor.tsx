@@ -10,6 +10,8 @@ type Props = {
   nodes: WorkflowNode[];
   selectedId: string;
   running: boolean;
+  runningNodeId: string;
+  completedTestNodeIds: string[];
   viewport: Viewport;
   leftOpen: boolean;
   search: string;
@@ -38,6 +40,8 @@ export function WorkflowEditor({
   nodes,
   selectedId,
   running,
+  runningNodeId,
+  completedTestNodeIds,
   viewport,
   leftOpen,
   search,
@@ -145,8 +149,8 @@ export function WorkflowEditor({
               const d = edgePath(node.x + size.width, node.y + size.height / 2, next.x, next.y + nextSize.height / 2);
               return (
                 <g key={node.id}>
-                  <path d={d} className={`edge-path ${running ? "running" : ""}`} />
-                  {running && <circle r={5} className="edge-pulse"><animateMotion dur="1.1s" repeatCount="indefinite" path={d} /></circle>}
+                    <path d={d} className={`edge-path ${running && (runningNodeId === next.id || completedTestNodeIds.includes(next.id)) ? "running" : ""}`} />
+                  {running && (runningNodeId === next.id || completedTestNodeIds.includes(next.id)) && <circle r={5} className="edge-pulse"><animateMotion dur="1.1s" repeatCount="indefinite" path={d} /></circle>}
                 </g>
               );
             })}
@@ -158,7 +162,7 @@ export function WorkflowEditor({
             return (
               <div
                 key={node.id}
-                className={`wf-node wf-node-compact ${wide ? "wf-node-agent" : "wf-node-card"} type-${node.type} ${selectedId === node.id ? "selected" : ""} ${running ? "running" : ""}`}
+                className={`wf-node wf-node-compact ${wide ? "wf-node-agent" : "wf-node-card"} type-${node.type} ${selectedId === node.id ? "selected" : ""} ${running && runningNodeId === node.id ? "running" : ""} ${completedTestNodeIds.includes(node.id) ? "test-complete" : ""}`}
                 style={{ left: node.x, top: node.y, width: nodeWidth, height: nodeHeight }}
                 onPointerDown={(e) => onNodePointerDown(e, node)}
                 title={`${node.name} — ${node.description}`}
@@ -173,7 +177,7 @@ export function WorkflowEditor({
                       <small>AI-assisted network diagnosis</small>
                     </div>
                   )}
-                  {running && <span className="wf-node-pulse" />}
+                  {running && runningNodeId === node.id && <span className="wf-node-pulse" />}
                 </div>
                 {!wide && <div className="wf-node-label">{node.name}</div>}
                 {wide && (

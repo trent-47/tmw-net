@@ -15,7 +15,6 @@ class MonitorScheduler {
       const { db } = await import("@/db/client");
       const { networkDevices } = await import("@/db/schema");
       const rows = await db().selectDistinct({ organizationId: networkDevices.organizationId }).from(networkDevices);
-      const { tenantMonitorStore } = await import("@/core/monitoring/store");
       if (rows.length === 0) {
         if (!this.reportedNoDevices) console.info("[monitor] idle: no devices are registered in the monitoring database");
         this.reportedNoDevices = true;
@@ -28,20 +27,30 @@ class MonitorScheduler {
       }
       for (const row of rows) {
         const organizationId = row.organizationId;
-        const settings = await tenantMonitorStore.getSettings(organizationId);
         const now = Date.now();
-        const intervalMs = Math.max(60_000, settings.intervalSeconds * 1000);
         const lastRun = this.lastRunAt.get(organizationId);
-        if (lastRun !== undefined && now - lastRun < intervalMs) continue;
+        if (lastRun !== undefined && now - lastRun < 5_000) continue;
         this.lastRunAt.set(organizationId, now);
-        const outcomes = await networkMonitor.runCycle(organizationId, "ping");
-        console.info(`[monitor] ping cycle org=${organizationId} devices=${outcomes.length} interval=${settings.intervalSeconds}s`);
+        const outcomes = await networkMonitor.runCycle(organizationId, "ping", { notify: false });
+        console.info(`[monitor] ping cycle org=${organizationId} devices=${outcomes.length} interval=5s`);
         for (const outcome of outcomes) {
           const latency = outcome.latencyMs === null ? "n/a" : `${outcome.latencyMs}ms`;
           const detail = outcome.ok ? "reply received" : outcome.alert?.summary ?? "no reply";
           const message = `[monitor] ${outcome.status.toUpperCase()} ${outcome.deviceName} (${outcome.ip}) reachable=${outcome.ok} latency=${latency} loss=${outcome.packetLossPercent}% detail=${detail}`;
           if (outcome.ok && outcome.status === "Online") console.info(message);
           else console.warn(message);
+          if (!outcome.ok || outcome.status !== "Online") {
+            const { publishEvent } = await import("@/core/runtime");
+            await publishEvent("monitor.run", {
+              organizationId,
+              deviceId: outcome.deviceId,
+              deviceName: outcome.deviceName,
+              ipAddress: outcome.ip,
+              status: outcome.status,
+              severity: outcome.status === "Offline" ? "critical" : "warning",
+              probe: outcome.probe,
+            }, "monitor-scheduler");
+          }
         }
       }
     } catch (error) {
@@ -53,8 +62,7 @@ class MonitorScheduler {
 
   start() {
     if (this.timer || process.env.NETMONI_SCHEDULER === "off") return;
-    const configuredTickMs = Number(process.env.NETMONI_POLL_MS ?? 5_000);
-    const intervalMs = Math.min(5_000, Math.max(1_000, Number.isFinite(configuredTickMs) ? configuredTickMs : 5_000));
+    const intervalMs = 5_000;
     console.info(`[monitor] scheduler started; checking due organizations every ${intervalMs}ms`);
     void this.tick();
     this.timer = setInterval(() => { void this.tick(); }, intervalMs);

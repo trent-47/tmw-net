@@ -12,7 +12,7 @@ import type { SavedWorkflow } from "./types";
 const WORKFLOW_KEY = "netmoni-workflows-v1";
 const EMPTY_WORKFLOWS: SavedWorkflow[] = [];
 
-let workflowSnapshot: SavedWorkflow[] | null = null;
+const workflowSnapshot: SavedWorkflow[] | null = null;
 const workflowListeners = new Set<() => void>();
 
 function readWorkflows(): SavedWorkflow[] {

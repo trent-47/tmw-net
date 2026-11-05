@@ -28,6 +28,8 @@ export type MonitorOutcome = {
   alert: NetworkAlert | null;
   message: { subject: string; body: string; provider: string; model: string; synthesized: boolean } | null;
   email: { to: string; status: string; detail?: string } | null;
+  command?: string;
+  output?: string;
 };
 
 class NetworkMonitor {
@@ -154,19 +156,74 @@ class NetworkMonitor {
       }
     }
 
-    return { deviceId: device.id, deviceName: device.name, ip: device.ip, probe: kind, ok: probe.ok, latencyMs: probe.latencyMs, packetLossPercent: probe.packetLossPercent, bandwidthInMbps: bandwidthIn, bandwidthOutMbps: bandwidthOut, status, alert, message, email };
+    if (options.notify !== false && status === "Online" && status !== device.status) {
+      const payload = this.buildAlert(device, check, "info", status);
+      alert = await tenantMonitorStore.saveAlert(organizationId, {
+        deviceId: payload.device.id,
+        deviceName: payload.device.name,
+        ipAddress: payload.device.ip,
+        severity: payload.severity,
+        status: payload.status,
+        summary: payload.summary,
+        recommendation: "No immediate action required. Continue monitoring for renewed latency, packet loss, or reachability failures.",
+        evidence: payload.evidence,
+        emailStatus: "pending",
+      });
+      message = await synthesizeFaultMessage(
+        {
+          device: payload.device,
+          severity: "info",
+          status,
+          probe: kind,
+          checks: history,
+          instruction: settings.aiInstruction,
+          recommendation: "Confirm the recovery is stable and continue normal monitoring.",
+        },
+        { provider: settings.aiProvider, model: settings.aiModel, apiKey: await tenantMonitorStore.getAiApiKey(organizationId) },
+      );
+      const smtp = await tenantMonitorStore.getSmtpConfig(organizationId) ?? smtpConfigFromEnv();
+      const recipient = settings.adminEmail || process.env.ADMIN_EMAIL;
+      if (smtp && recipient) {
+        try {
+          const sent = await sendFaultEmail(smtp, {
+            to: recipient,
+            subject: message.subject || `[Network Recovered] ${device.name} is Online`,
+            text: message.body,
+          });
+          email = { to: recipient, status: "sent", detail: sent.messageId };
+          await tenantMonitorStore.updateAlertEmailStatus(organizationId, alert.id, "sent");
+        } catch (error) {
+          email = { to: recipient, status: "failed", detail: error instanceof Error ? error.message : "SMTP dispatch failed" };
+          await tenantMonitorStore.updateAlertEmailStatus(organizationId, alert.id, `failed: ${email.detail ?? ""}`.slice(0, 200));
+        }
+      } else {
+        email = { to: recipient ?? "", status: smtp ? "pending-recipient" : "not-configured" };
+      }
+    }
+
+    const command = kind === "ping"
+      ? `${process.platform === "win32" ? "ping" : "ping"} ${process.platform === "win32" ? "-n 1 -w 2000" : "-c 1 -W 2"} ${device.ip}`
+      : kind === "tcp"
+        ? `TCP probe ${device.ip}:${options.port ?? 80}`
+        : `SNMP probe ${device.ip}`;
+    const output = probe.error ?? check.detail ?? `${probe.ok ? "Response received" : "No response"}; latency=${probe.latencyMs ?? "n/a"} ms; packet loss=${probe.packetLossPercent}%`;
+    return { deviceId: device.id, deviceName: device.name, ip: device.ip, probe: kind, ok: probe.ok, latencyMs: probe.latencyMs, packetLossPercent: probe.packetLossPercent, bandwidthInMbps: bandwidthIn, bandwidthOutMbps: bandwidthOut, status, alert, message, email, command, output };
   }
 
   async testDevice(organizationId: string, device: NetworkDevice, kind: CheckRow["probe"], options: { port?: number; community?: string } = {}): Promise<MonitorOutcome> {
     return this.processCheck(organizationId, device, kind, { ...options, notify: false });
   }
 
-  async runCycle(organizationId: string, probe: CheckRow["probe"] = "ping"): Promise<MonitorOutcome[]> {
+  async runCycle(
+    organizationId: string,
+    probe: CheckRow["probe"] = "ping",
+    options: { notify?: boolean } = {},
+  ): Promise<MonitorOutcome[]> {
     const devices = await tenantMonitorStore.listDevices(organizationId);
     const outcomes: MonitorOutcome[] = [];
     for (const device of devices) {
       try {
-        outcomes.push(await this.processCheck(organizationId, device, probe, { notify: true }));
+        outcomes.push(await this.processCheck(organizationId, device, probe, { notify: options.notify !== false }));
       } catch (error) {
         outcomes.push({
           deviceId: device.id, deviceName: device.name, ip: device.ip, probe, ok: false, latencyMs: null, packetLossPercent: 100, bandwidthInMbps: null, bandwidthOutMbps: null,

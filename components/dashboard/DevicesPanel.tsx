@@ -3,7 +3,7 @@
 import type { FormEvent } from "react";
 import { Network, Plus, Trash2, X } from "lucide-react";
 import { DeviceGlyph } from "./node-canvas";
-import type { BackendResult, DeviceEntry, DeviceForm } from "./types";
+import type { BackendResult, DeviceEntry, DeviceForm, DeviceTestState } from "./types";
 
 type Props = {
   devices: DeviceEntry[];
@@ -16,10 +16,11 @@ type Props = {
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   onRemove: (ip: string) => void;
   onTest: (device: DeviceEntry) => void;
+  testState: DeviceTestState | null;
 };
 
 /** Registered network devices: add, probe and remove monitoring targets. */
-export function DevicesPanel({ devices, results, formOpen, form, onOpenForm, onCloseForm, onFormChange, onSubmit, onRemove, onTest }: Props) {
+export function DevicesPanel({ devices, results, formOpen, form, onOpenForm, onCloseForm, onFormChange, onSubmit, onRemove, onTest, testState }: Props) {
   return (
     <section className="section-panel">
       <div className="section-panel-inner wide-panel">
@@ -39,6 +40,28 @@ export function DevicesPanel({ devices, results, formOpen, form, onOpenForm, onC
             <button className="icon-btn danger" title="Remove device" onClick={() => onRemove(d.ip)}><Trash2 size={16} /></button>
           </article>)}
         </div>
+
+        {testState && (
+          <div className={`device-test-terminal ${testState.status}`}>
+            <div className="device-test-terminal-head">
+              <div><span className="terminal-dot red" /><span className="terminal-dot amber" /><span className="terminal-dot green" /></div>
+              <strong>NetMoni Probe Terminal</strong>
+              <span>{testState.deviceName} · {testState.ip}</span>
+            </div>
+            <div className="device-test-progress">
+              <div className="device-test-progress-head">
+                <strong>{testState.status === "running" ? "Probe in progress" : "Probe complete"}</strong>
+                <span>{testState.progress}%</span>
+              </div>
+              <div className="device-test-progress-track"><div style={{ width: `${testState.progress}%` }} /></div>
+            </div>
+            <pre className="device-test-output">
+              {testState.command && <span className="terminal-command">$ {testState.command}</span>}
+              {testState.lines.map((line, index) => <span key={`${index}-${line}`} className={line.startsWith("error:") ? "terminal-error" : line.startsWith("ok:") ? "terminal-success" : ""}>{line}</span>)}
+              {testState.status === "running" && <span className="terminal-cursor">▌</span>}
+            </pre>
+          </div>
+        )}
 
         {results.length > 0 && (
           <div className="dashboard-integration-grid">
